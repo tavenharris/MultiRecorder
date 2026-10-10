@@ -481,6 +481,7 @@ impl WindowsPlatform {
         ]
     }
 
+    #[allow(dead_code)]
     pub fn validate_audio_tracks(
         &self,
         _tracks: &[AudioTrackConfig],
@@ -543,6 +544,7 @@ impl CapturePlatform for WindowsPlatform {
 
 /// Spawns a real-time audio monitor stream using native Windows CoreAudio WASAPI loopback or capture via CPAL.
 /// Monitors peak levels directly without spawning external subprocesses.
+#[allow(dead_code)]
 pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal::Stream> {
     let host = cpal::default_host();
     let clean_id = identifier

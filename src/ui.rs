@@ -235,6 +235,8 @@ impl MultiRecordingApp {
         if let Some(mut ps2) = self.preview_stream_2.take() {
             ps2.stop();
         }
+        self.preview_texture_1 = None;
+        self.preview_texture_2 = None;
         self.last_preview_seq_1 = 0;
         self.last_preview_seq_2 = 0;
         std::thread::sleep(Duration::from_millis(250));
@@ -283,25 +285,48 @@ impl MultiRecordingApp {
     }
 
     fn sync_device_selections(&mut self) {
-        let v_devs = self.video_devices();
-        let valid_v_indices: Vec<usize> = v_devs.iter().map(|d| d.index).collect();
+        let v_devs: Vec<(usize, String, String)> = self.video_devices()
+            .into_iter()
+            .map(|d| (d.index, d.id.clone(), d.name.clone()))
+            .collect();
+        let valid_v_indices: Vec<usize> = v_devs.iter().map(|(idx, _, _)| *idx).collect();
+
+        let find_v_idx = |device_str: &str, fallback_pos: usize| -> usize {
+            if let Some((idx, _, _)) = v_devs.iter().find(|(_, id, _)| id == device_str) {
+                return *idx;
+            }
+            let clean = device_str.strip_prefix("video:").unwrap_or(device_str).trim();
+            if let Some((idx, _, _)) = v_devs.iter().find(|(_, id, name)| name == device_str || name == clean || id == clean) {
+                return *idx;
+            }
+            if let Ok(num) = clean.parse::<usize>() {
+                if valid_v_indices.contains(&num) {
+                    return num;
+                }
+            }
+            valid_v_indices.get(fallback_pos).or_else(|| valid_v_indices.first()).copied().unwrap_or(0)
+        };
 
         if let Some(src) = self.config.sources.first() {
-            let idx = src.video_device.parse().unwrap_or(0);
-            self.game_video_idx = if valid_v_indices.contains(&idx) {
-                idx
-            } else {
-                valid_v_indices.first().copied().unwrap_or(0)
-            };
+            self.game_video_idx = find_v_idx(&src.video_device, 0);
         }
         if self.config.sources.len() > 1 {
             let src2 = &self.config.sources[1];
-            let idx = src2.video_device.parse().unwrap_or(0);
-            self.cam_video_idx = if valid_v_indices.contains(&idx) {
-                idx
-            } else {
-                valid_v_indices.get(1).or_else(|| valid_v_indices.first()).copied().unwrap_or(0)
-            };
+            self.cam_video_idx = find_v_idx(&src2.video_device, 1);
+        }
+
+        // Validate encoders against current platform support
+        let valid_encoders: Vec<&str> = crate::platform::CurrentPlatform
+            .available_encoders()
+            .iter()
+            .map(|(enc, _)| *enc)
+            .collect();
+        let default_enc = crate::platform::CurrentPlatform.default_video_encoder();
+
+        for src in &mut self.config.sources {
+            if !valid_encoders.contains(&src.encoder.as_str()) {
+                src.encoder = default_enc.to_string();
+            }
         }
 
         // Ensure at least 2 sources exist
@@ -314,7 +339,7 @@ impl MultiRecordingApp {
                 resolution: Some("1920x1080".to_string()),
                 fps: Some(60),
                 video_bitrate: if idx == 0 { "40M".to_string() } else { "15M".to_string() },
-                encoder: crate::platform::CurrentPlatform.default_video_encoder().to_string(),
+                encoder: default_enc.to_string(),
             });
         }
 

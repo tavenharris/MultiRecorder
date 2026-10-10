@@ -130,11 +130,14 @@ impl PreviewStream {
             let fmt_arc = Arc::clone(&self.detected_format);
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
+                let mut found = false;
                 for line in reader.lines().flatten() {
-                    if let Some(fmt_str) = parse_detected_format(&line, 30) {
-                        if let Ok(mut lock) = fmt_arc.lock() {
-                            *lock = Some(fmt_str);
-                            break;
+                    if !found {
+                        if let Some(fmt_str) = parse_detected_format(&line, 30) {
+                            if let Ok(mut lock) = fmt_arc.lock() {
+                                *lock = Some(fmt_str);
+                                found = true;
+                            }
                         }
                     }
                 }

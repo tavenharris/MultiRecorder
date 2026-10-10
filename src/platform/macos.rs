@@ -67,7 +67,8 @@ impl MacOSPlatform {
     }
 
     pub fn build_preview_input_args(&self, video_device: &str) -> Vec<String> {
-        let is_screen = video_device.to_lowercase().contains("screen");
+        let clean = clean_avfoundation_video_device(video_device);
+        let is_screen = clean.to_lowercase().contains("screen");
         let framerate = if is_screen { "60" } else { "30" };
         vec![
             "-f".to_string(),
@@ -75,7 +76,7 @@ impl MacOSPlatform {
             "-framerate".to_string(),
             framerate.to_string(),
             "-i".to_string(),
-            format!("{}:none", video_device),
+            format!("{}:none", clean),
         ]
     }
 
@@ -85,6 +86,7 @@ impl MacOSPlatform {
         in_fps: u32,
         enabled_tracks: &[AudioTrackConfig],
     ) -> Vec<String> {
+        let clean = clean_avfoundation_video_device(video_device);
         let mut args = Vec::new();
         if let Some(first_track) = enabled_tracks.first() {
             args.extend([
@@ -93,7 +95,7 @@ impl MacOSPlatform {
                 "-framerate".to_string(),
                 in_fps.to_string(),
                 "-i".to_string(),
-                format!("{}:{}", video_device, first_track.device_index),
+                format!("{}:{}", clean, first_track.device_index),
             ]);
         } else {
             args.extend([
@@ -102,7 +104,7 @@ impl MacOSPlatform {
                 "-framerate".to_string(),
                 in_fps.to_string(),
                 "-i".to_string(),
-                format!("{}:none", video_device),
+                format!("{}:none", clean),
             ]);
         }
 
@@ -119,13 +121,16 @@ impl MacOSPlatform {
     }
 
     pub fn build_audio_monitor_args(&self, audio_device_identifier: &str) -> Vec<String> {
-        let idx = audio_device_identifier
+        let clean = audio_device_identifier
             .strip_prefix("in:")
             .unwrap_or(audio_device_identifier);
-        let input = if idx.contains(':') {
-            idx.to_string()
+        let input = if clean.starts_with("none:") {
+            clean.to_string()
+        } else if clean.contains(':') && !clean.starts_with("out:") {
+            clean.to_string()
         } else {
-            format!("none:{}", idx)
+            let bare = clean.strip_prefix("out:").unwrap_or(clean);
+            format!("none:{}", bare)
         };
         vec![
             "-f".to_string(),
@@ -237,6 +242,19 @@ impl CapturePlatform for MacOSPlatform {
     }
 }
 
+/// Normalizes AVFoundation video device identifiers (e.g. "video:0", "video:1", "0", "FaceTime HD Camera")
+/// into clean tokens suitable for FFmpeg AVFoundation inputs without redundant colons.
+pub fn clean_avfoundation_video_device(dev: &str) -> &str {
+    let mut s = dev.trim();
+    if let Some(stripped) = s.strip_prefix("video:") {
+        s = stripped.trim();
+    }
+    if let Some(stripped) = s.strip_suffix(":none") {
+        s = stripped.trim();
+    }
+    s
+}
+
 pub fn parse_avfoundation_devices(output: &str) -> Result<Vec<Device>> {
     let mut devices = Vec::new();
     let mut current_type: Option<DeviceType> = None;
@@ -261,9 +279,9 @@ pub fn parse_avfoundation_devices(output: &str) -> Result<Vec<Device>> {
                     if let Ok(idx) = idx_match.as_str().parse::<usize>() {
                         let name = name_match.as_str().trim().to_string();
                         let (id, av_idx) = match dev_type {
-                            DeviceType::Video => (format!("video:{}", idx), None),
+                            DeviceType::Video => (idx.to_string(), None),
                             DeviceType::AudioInput => (format!("in:{}", idx), Some(idx)),
-                            DeviceType::AudioOutput => (format!("out:{}", idx), None),
+                            DeviceType::AudioOutput => (format!("out:{}", name), None),
                         };
                         let (res, fps) = match dev_type {
                             DeviceType::Video => {
@@ -357,6 +375,27 @@ mod tests {
             screen_args,
             vec!["-f", "avfoundation", "-framerate", "60", "-i", "Capture screen 0:none"]
         );
+
+        // Prefixed "video:0" and "video:1" (e.g. from device ID)
+        let prefixed_args = mac.build_preview_input_args("video:0");
+        assert_eq!(prefixed_args, vec!["-f", "avfoundation", "-framerate", "30", "-i", "0:none"]);
+
+        let cam_args = mac.build_preview_input_args("FaceTime HD Camera");
+        assert_eq!(cam_args, vec!["-f", "avfoundation", "-framerate", "30", "-i", "FaceTime HD Camera:none"]);
+
+        let prefixed_cam = mac.build_preview_input_args("video:FaceTime HD Camera");
+        assert_eq!(prefixed_cam, vec!["-f", "avfoundation", "-framerate", "30", "-i", "FaceTime HD Camera:none"]);
+    }
+
+    #[test]
+    fn test_clean_avfoundation_video_device() {
+        assert_eq!(clean_avfoundation_video_device("0"), "0");
+        assert_eq!(clean_avfoundation_video_device("video:0"), "0");
+        assert_eq!(clean_avfoundation_video_device("video:1"), "1");
+        assert_eq!(clean_avfoundation_video_device("0:none"), "0");
+        assert_eq!(clean_avfoundation_video_device("video:0:none"), "0");
+        assert_eq!(clean_avfoundation_video_device("FaceTime HD Camera"), "FaceTime HD Camera");
+        assert_eq!(clean_avfoundation_video_device("video:FaceTime HD Camera"), "FaceTime HD Camera");
     }
 
     #[test]
@@ -381,6 +420,16 @@ mod tests {
             args,
             vec![
                 "-f", "avfoundation", "-framerate", "60", "-i", "0:0",
+                "-f", "avfoundation", "-i", "none:1"
+            ]
+        );
+
+        // Prefixed video device: "video:1"
+        let prefixed_args = mac.build_recording_input_args("video:1", 30, &tracks);
+        assert_eq!(
+            prefixed_args,
+            vec![
+                "-f", "avfoundation", "-framerate", "30", "-i", "1:0",
                 "-f", "avfoundation", "-i", "none:1"
             ]
         );
