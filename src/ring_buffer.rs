@@ -122,6 +122,37 @@ impl RingBufferManager {
             estimated_duration_secs: est_duration,
         })
     }
+
+    /// Deletes all segment files on disk for this source
+    pub fn wipe_all(&self) -> Result<usize> {
+        let segments = self.list_segments()?;
+        let mut removed = 0;
+        for seg in segments {
+            if let Ok(()) = fs::remove_file(&seg.path) {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Wipes all mp4 segment files in the buffer directory
+    pub fn wipe_buffer_dir(buffer_dir: &std::path::Path) -> Result<usize> {
+        if !buffer_dir.exists() {
+            return Ok(0);
+        }
+        let mut count = 0;
+        if let Ok(entries) = fs::read_dir(buffer_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().map(|e| e == "mp4").unwrap_or(false) {
+                    if let Ok(()) = fs::remove_file(p) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        Ok(count)
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +200,40 @@ mod tests {
         assert_eq!(mgr.list_segments().unwrap().len(), 0);
 
         // Cleanup
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_wipe_buffer_operations() {
+        let temp_dir = std::env::temp_dir().join(format!("test_ring_wipe_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let mgr = RingBufferManager::new("gameplay", &temp_dir, 2);
+
+        let file1 = temp_dir.join("gameplay_20261010_120000.mp4");
+        let file2 = temp_dir.join("gameplay_20261010_120002.mp4");
+        let other = temp_dir.join("facecam_20261010_120000.mp4");
+        let txt = temp_dir.join("not_a_segment.txt");
+
+        fs::write(&file1, b"mock 1").unwrap();
+        fs::write(&file2, b"mock 2").unwrap();
+        fs::write(&other, b"mock other").unwrap();
+        fs::write(&txt, b"keep me").unwrap();
+
+        // wipe_all deletes only gameplay segments
+        let removed = mgr.wipe_all().unwrap();
+        assert_eq!(removed, 2);
+        assert!(!file1.exists());
+        assert!(!file2.exists());
+        assert!(other.exists());
+        assert!(txt.exists());
+
+        // wipe_buffer_dir removes all .mp4 segments in the folder, preserving non-mp4 files
+        let wiped = RingBufferManager::wipe_buffer_dir(&temp_dir).unwrap();
+        assert_eq!(wiped, 1);
+        assert!(!other.exists());
+        assert!(txt.exists());
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

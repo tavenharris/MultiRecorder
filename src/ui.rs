@@ -629,6 +629,9 @@ impl MultiRecordingApp {
         let _ = fs::create_dir_all(&self.config.buffer_dir);
         let _ = fs::create_dir_all(&self.config.output_dir);
 
+        // Wipe any previous un-saved cached segments in buffer_dir when starting a fresh session
+        let _ = RingBufferManager::wipe_buffer_dir(&self.config.buffer_dir);
+
         // Sync dropdown selections into config
         let dev_id1 = self.video_devices().into_iter().find(|d| d.index == self.game_video_idx).map(|d| d.id.clone()).unwrap_or_else(|| self.game_video_idx.to_string());
         let dev_id2 = self.video_devices().into_iter().find(|d| d.index == self.cam_video_idx).map(|d| d.id.clone()).unwrap_or_else(|| self.cam_video_idx.to_string());
@@ -728,12 +731,20 @@ impl MultiRecordingApp {
             let _ = recorder.stop();
         }
         self.recorders.clear();
+
+        // Wipe all cached segments from the buffer on stop (only saved clips are kept)
+        let _ = RingBufferManager::wipe_buffer_dir(&self.config.buffer_dir);
+        for mgr in &self.managers {
+            let _ = mgr.wipe_all();
+        }
+        self.managers.clear();
+
         self.is_recording = false;
         self.recording_started_at = None;
         self.last_preview_seq_1 = 0;
         self.last_preview_seq_2 = 0;
         self.ensure_preview_streams();
-        self.status_message = Some(("Recording stopped. Buffer preserved.".to_string(), Instant::now(), false));
+        self.status_message = Some(("Recording stopped. Buffer reset & cleared.".to_string(), Instant::now(), false));
     }
 
     pub fn trigger_flashback(&mut self, duration_secs: u64) {

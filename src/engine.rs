@@ -38,6 +38,7 @@ impl RecordingEngine {
     pub async fn run(&mut self) -> Result<()> {
         fs::create_dir_all(&self.config.buffer_dir)?;
         fs::create_dir_all(&self.config.output_dir)?;
+        let _ = RingBufferManager::wipe_buffer_dir(&self.config.buffer_dir);
 
         println!("{}", "════════════════════════════════════════════════════════════════".cyan().bold());
         println!("{}", "             MULTI-RECORDING & FLASHBACK ENGINE                 ".green().bold());
@@ -164,7 +165,12 @@ impl RecordingEngine {
             let _ = recorder.stop();
         }
 
-        println!("{}", "All recorders stopped. Buffer intact.".green());
+        let _ = RingBufferManager::wipe_buffer_dir(&self.config.buffer_dir);
+        for mgr in &self.managers {
+            let _ = mgr.wipe_all();
+        }
+
+        println!("{}", "All recorders stopped. Buffer cleared.".green());
         Ok(())
     }
 
