@@ -36,6 +36,10 @@ pub struct MultiRecordingApp {
     preview_stream_2: Option<PreviewStream>,
     preview_texture_1: Option<egui::TextureHandle>,
     preview_texture_2: Option<egui::TextureHandle>,
+    #[allow(dead_code)]
+    last_preview_seq_1: u64,
+    #[allow(dead_code)]
+    last_preview_seq_2: u64,
 
     // Real Hardware Audio Monitors
     audio_monitors: [Option<AudioTrackMonitor>; 5],
@@ -83,6 +87,8 @@ impl MultiRecordingApp {
             preview_stream_2: None,
             preview_texture_1: None,
             preview_texture_2: None,
+            last_preview_seq_1: 0,
+            last_preview_seq_2: 0,
             status_message: None,
             recent_exports: Vec::new(),
             selected_flashback_secs: selected_secs,
@@ -180,6 +186,8 @@ impl MultiRecordingApp {
         if let Some(mut ps2) = self.preview_stream_2.take() {
             ps2.stop();
         }
+        self.last_preview_seq_1 = 0;
+        self.last_preview_seq_2 = 0;
         std::thread::sleep(Duration::from_millis(250));
     }
 
@@ -576,6 +584,8 @@ impl MultiRecordingApp {
 
         let _ = self.config.save_to_file(&self.config_path);
 
+        self.last_preview_seq_1 = 0;
+        self.last_preview_seq_2 = 0;
         self.managers.clear();
         self.recorders.clear();
 
@@ -653,6 +663,8 @@ impl MultiRecordingApp {
         self.recorders.clear();
         self.is_recording = false;
         self.recording_started_at = None;
+        self.last_preview_seq_1 = 0;
+        self.last_preview_seq_2 = 0;
         self.ensure_preview_streams();
         self.status_message = Some(("Recording stopped. Buffer preserved.".to_string(), Instant::now(), false));
     }
@@ -949,18 +961,18 @@ impl eframe::App for MultiRecordingApp {
                 .inner_margin(Margin::symmetric(14.0, 10.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        // Left: Start / Stop Engine Button
+                        // Left: Start / Stop Flashback Button
                         if self.is_recording {
                             if ui.add(
-                                egui::Button::new(RichText::new("■ Stop Engine").color(Color32::from_rgb(244, 63, 94)).strong())
-                                    .min_size(Vec2::new(120.0, 32.0))
+                                egui::Button::new(RichText::new("■ Stop Flashback").color(Color32::from_rgb(244, 63, 94)).strong())
+                                    .min_size(Vec2::new(130.0, 32.0))
                             ).clicked() {
                                 self.stop_engine();
                             }
                         } else {
                             if ui.add(
-                                egui::Button::new(RichText::new("▶ Start Engine").color(Color32::from_rgb(16, 185, 129)).strong())
-                                    .min_size(Vec2::new(120.0, 32.0))
+                                egui::Button::new(RichText::new("▶ Start Flashback").color(Color32::from_rgb(16, 185, 129)).strong())
+                                    .min_size(Vec2::new(130.0, 32.0))
                             ).clicked() {
                                 self.start_engine();
                             }
@@ -969,7 +981,7 @@ impl eframe::App for MultiRecordingApp {
                         if self.is_recording {
                             ui.add_space(6.0);
                             if ui.add(
-                                egui::Button::new(RichText::new("⚡ Flashback [F]").color(Color32::WHITE).size(11.0).strong())
+                                egui::Button::new(RichText::new("⚡ Save Clip [F]").color(Color32::WHITE).size(11.0).strong())
                                     .fill(Color32::from_rgb(225, 29, 72))
                                     .min_size(Vec2::new(105.0, 32.0))
                             ).clicked() {
@@ -994,7 +1006,7 @@ impl eframe::App for MultiRecordingApp {
 
                             ui.add_space(16.0);
 
-                            // Live Timer (3:58s in sketch, formatted as H:MM:SS for up to 2 hours)
+                            // Live Timer (counts up during recording; 0:00s when idle)
                             let format_dur = |secs: u64| {
                                 if secs >= 3600 {
                                     format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
@@ -1006,20 +1018,35 @@ impl eframe::App for MultiRecordingApp {
                                 let elapsed = self.recording_started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
                                 format_dur(elapsed)
                             } else {
-                                format_dur(self.selected_flashback_secs)
+                                "0:00s".to_string()
                             };
                             ui.label(RichText::new(timer_text).font(FontId::new(16.0, FontFamily::Monospace)).strong().color(Color32::from_rgb(244, 244, 245)));
 
                             ui.add_space(18.0);
 
-                            // Metrics: 13 Mb/s  (20 GB) in sketch
-                            let total_size_mb: f64 = self.managers.iter().filter_map(|m| m.get_stats().ok()).map(|s| s.total_size_mb).sum();
-                            let size_str = if total_size_mb > 1024.0 {
+                            // Metrics: 0 Mb/s (0 MB) when idle, active write rate and disk buffer size when recording
+                            let total_size_mb: f64 = if self.is_recording {
+                                self.managers.iter().filter_map(|m| m.get_stats().ok()).map(|s| s.total_size_mb).sum()
+                            } else {
+                                0.0
+                            };
+                            let size_str = if total_size_mb >= 1024.0 {
                                 format!("({:.1} GB)", total_size_mb / 1024.0)
                             } else {
-                                format!("({:.0} MB)", total_size_mb)
+                                format!("({:.0} MB)", total_size_mb.max(0.0))
                             };
-                            let bitrate_str = if self.is_recording { "40 Mb/s" } else { "13 Mb/s" };
+                            let bitrate_str = if self.is_recording {
+                                let total_mbps: u64 = self.config.sources.iter().filter_map(|s| {
+                                    s.video_bitrate.trim_end_matches(['M', 'm']).parse::<u64>().ok()
+                                }).sum();
+                                if total_mbps > 0 {
+                                    format!("{} Mb/s", total_mbps)
+                                } else {
+                                    "40 Mb/s".to_string()
+                                }
+                            } else {
+                                "0 Mb/s".to_string()
+                            };
                             ui.label(RichText::new(format!("{}  {}", bitrate_str, size_str)).font(FontId::new(15.0, FontFamily::Proportional)).color(Color32::from_rgb(212, 212, 216)));
                         });
                     });

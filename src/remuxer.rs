@@ -30,8 +30,12 @@ impl Remuxer {
 
         let mut manifest_content = String::new();
         for seg in segments {
+            let seg_str = seg.to_string_lossy();
+            if seg_str.contains('\n') || seg_str.contains('\r') {
+                bail!("Security violation: segment path contains invalid newline character: {:?}", seg);
+            }
             // FFmpeg concat demuxer expects single-quote escaped paths
-            let canonical_str = seg.to_string_lossy().replace('\'', "'\\''");
+            let canonical_str = seg_str.replace('\'', "'\\''");
             manifest_content.push_str(&format!("file '{}'\n", canonical_str));
         }
 
@@ -148,5 +152,14 @@ mod tests {
         let result = Remuxer::stitch_segments(&[], &dummy_out, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No segments provided"));
+    }
+
+    #[test]
+    fn test_stitch_segments_newline_rejected() {
+        let bad_seg = PathBuf::from("/tmp/bad\nsegment.mp4");
+        let dummy_out = PathBuf::from("/tmp/dummy_test_out.mp4");
+        let result = Remuxer::stitch_segments(&[bad_seg], &dummy_out, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("newline character"));
     }
 }

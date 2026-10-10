@@ -98,12 +98,11 @@ impl RingBufferManager {
             / self.segment_duration_secs.max(1))
         .max(1) as usize;
 
+        let start = segments.len().saturating_sub(needed_count);
         let selected: Vec<PathBuf> = segments
-            .iter()
-            .rev()
-            .take(needed_count)
-            .rev()
-            .map(|s| s.path.clone())
+            .into_iter()
+            .skip(start)
+            .map(|s| s.path)
             .collect();
 
         Ok(selected)

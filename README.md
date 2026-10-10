@@ -3,7 +3,7 @@
 [![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%28Apple%20Silicon%29-blue.svg)](https://apple.com)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-12%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-15%20passing-brightgreen.svg)]()
 
 A high-performance macOS desktop application built in 100% Rust for content creators, streamers, and gamers. MultiRecording captures multiple simultaneous video feeds (e.g. 4K capture card gameplay + webcam facecam) and up to 5 discrete audio tracks (mic, game sound, Discord, speaker output), maintaining a continuous **retroactive flashback buffer** (up to 2 hours) backed by Apple Silicon hardware acceleration (`VideoToolbox`). At any moment, hit **Save Flashback** (`Space` or `F`) to instantly export the last $N$ minutes losslessly without re-encoding.
 
@@ -14,6 +14,7 @@ A high-performance macOS desktop application built in 100% Rust for content crea
 - [Key Features](#key-features)
 - [System Architecture](#system-architecture)
 - [Project & Code Structure](#project--code-structure)
+- [AI Agents & Contributors Guide (`AGENTS.md`)](AGENTS.md)
 - [Quick Start](#quick-start)
   - [Prerequisites](#prerequisites)
   - [Running the GUI](#running-the-gui)
@@ -30,14 +31,15 @@ A high-performance macOS desktop application built in 100% Rust for content crea
 
 - **Multi-Source Video Capture**: Concurrently record independent video inputs (e.g. Elgato 4K capture card, internal screen, external webcam, or capture dongle) perfectly synchronized.
 - **Accurate Canvas Resolution Probing**: Automatically detects native Retina display resolutions (e.g. `3024x1964 60fps`) and live hardware webcam parameters directly from AVFoundation.
-- **Interactive Output Resolution Selectors**: Choose individual target resolutions per stream directly from the UI dropdown: `1080p 60fps`, `1440p 60fps`, `4K 60fps`, `720p 60fps`, `1080p 30fps`, or `Native Input`.
+- **Decoupled Resolution & Frame Rate Selectors**: Separated dropdowns for target resolution (`Native`, `1080p`, `1440p`, `4K`, `720p`) and target frame rate (`30 fps`, `60 fps`). Output frame rate is strictly constrained and auto-clamped by input hardware capabilities (e.g. 30fps webcams are prevented from requesting duplicate 60fps).
 - **Up to 5 Discrete Multi-Track Audio Channels**: Simultaneously record isolated audio tracks (e.g., Track 1: Game, Track 2: Mic, Track 3: Discord, Track 4: Speakers, Track 5: Aux).
 - **Embedded Track Labels**: Custom track titles are embedded directly into MP4/MOV container metadata (`title=Game Audio`, `title=Microphone`) so Premiere Pro & DaVinci Resolve timelines automatically label tracks upon import.
 - **Live Hardware Audio VU Meters**: Real-time decibel meters powered by an internal AVFoundation PCM audio sampler reading live float samples from active audio hardware.
 - **Speaker & AirPods Capture**: Built-in support for macOS CoreAudio output recording via the BlackHole loopback driver.
 - **Zero-CPU Hardware Acceleration**: Leverages Apple Silicon's dedicated media engines via `h264_videotoolbox` and `hevc_videotoolbox` (H.265).
 - **Sub-Second Lossless Flashback Remuxing**: Maintains a rolling ring buffer (from 1 minute up to 2 hours) in fast temporary storage. Pressing `Space` or `F` stitches the buffer losslessly using FFmpeg concat stream copy (`-c copy`) in ~2 seconds.
-- **Comprehensive Settings Drawer**:
+- **Dedicated Preferences & Settings Popup Window**:
+  - Independent floating window accessible via the `[⚙ settings]` button.
   - Container format selection: **MP4** (`.mp4`), **QuickTime** (`.mov`), or **Matroska** (`.mkv`).
   - Output folder selection with native macOS Finder folder browser (`📂 Browse...`) and reveal.
   - Video encoder toggles (`h264_videotoolbox`, `hevc_videotoolbox`, `libx264`).
@@ -170,7 +172,8 @@ cargo run --release -- gui
 ```
 
 #### GUI Highlights:
-- **Engine Control**: Click **`▶ Start Engine`** to begin continuous buffering.
+- **Flashback Control**: Click **`▶ Start Flashback`** to begin continuous buffering.
+- **Save Clip**: Click **`⚡ Save Clip [F]`** or press `F` / `Space` to instantly extract the rolling buffer.
 - **Live Video Viewports**: Watch preview video feeds locked to a crisp 16:9 aspect ratio.
 - **Input / Output Badges**:
   - `input`: Live probed resolution (e.g., `3024x1964 60fps` for Liquid Retina or `1920x1080 30fps` for webcams).

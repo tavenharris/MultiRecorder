@@ -71,18 +71,32 @@ fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Commands::Gui { config: PathBuf::from("config.toml") }) {
         Commands::Gui { config: config_path } => {
+            let icon_bytes = include_bytes!("../MultiRecorder.png");
+            set_macos_dock_icon(icon_bytes);
+
+            let icon_data = eframe::icon_data::from_png_bytes(icon_bytes).ok();
+
+            let mut viewport = eframe::egui::ViewportBuilder::default()
+                .with_inner_size([900.0, 760.0])
+                .with_min_inner_size([800.0, 600.0])
+                .with_title("MultiRecording Pro");
+
+            if let Some(icon) = icon_data {
+                viewport = viewport.with_icon(icon);
+            }
+
             let native_options = eframe::NativeOptions {
-                viewport: eframe::egui::ViewportBuilder::default()
-                    .with_inner_size([900.0, 760.0])
-                    .with_min_inner_size([800.0, 600.0])
-                    .with_title("MultiRecording Pro"),
+                viewport,
                 ..Default::default()
             };
 
             eframe::run_native(
                 "MultiRecording Pro",
                 native_options,
-                Box::new(|cc| Ok(Box::new(ui::MultiRecordingApp::new(cc, config_path)))),
+                Box::new(|cc| {
+                    set_macos_dock_icon(include_bytes!("../MultiRecorder.png"));
+                    Ok(Box::new(ui::MultiRecordingApp::new(cc, config_path)))
+                }),
             )
             .map_err(|e| anyhow::anyhow!("UI error: {}", e))?;
         }
@@ -184,3 +198,63 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+pub fn set_macos_dock_icon(png_bytes: &[u8]) {
+    use std::ffi::c_void;
+    type Id = *mut c_void;
+    type Sel = *mut c_void;
+
+    #[link(name = "AppKit", kind = "framework")]
+    extern "C" {
+        fn objc_getClass(name: *const std::os::raw::c_char) -> Id;
+        fn sel_registerName(name: *const std::os::raw::c_char) -> Sel;
+        fn objc_msgSend() -> ();
+    }
+
+    unsafe {
+        let cls_nsdata = objc_getClass(b"NSData\0".as_ptr() as *const _);
+        let cls_nsimage = objc_getClass(b"NSImage\0".as_ptr() as *const _);
+        let cls_nsapp = objc_getClass(b"NSApplication\0".as_ptr() as *const _);
+
+        if cls_nsdata.is_null() || cls_nsimage.is_null() || cls_nsapp.is_null() {
+            return;
+        }
+
+        let sel_data_with_bytes: unsafe extern "C" fn(Id, Sel, *const c_void, usize) -> Id =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let sel_alloc: unsafe extern "C" fn(Id, Sel) -> Id =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let sel_init_with_data: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let sel_shared_app: unsafe extern "C" fn(Id, Sel) -> Id =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let sel_set_icon: unsafe extern "C" fn(Id, Sel, Id) -> () =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+
+        let sel_data = sel_registerName(b"dataWithBytes:length:\0".as_ptr() as *const _);
+        let sel_alloc_id = sel_registerName(b"alloc\0".as_ptr() as *const _);
+        let sel_init_id = sel_registerName(b"initWithData:\0".as_ptr() as *const _);
+        let sel_shared_id = sel_registerName(b"sharedApplication\0".as_ptr() as *const _);
+        let sel_set_icon_id = sel_registerName(b"setApplicationIconImage:\0".as_ptr() as *const _);
+
+        let data = sel_data_with_bytes(cls_nsdata, sel_data, png_bytes.as_ptr() as *const c_void, png_bytes.len());
+        if data.is_null() {
+            return;
+        }
+
+        let image_alloc = sel_alloc(cls_nsimage, sel_alloc_id);
+        let image = sel_init_with_data(image_alloc, sel_init_id, data);
+        if image.is_null() {
+            return;
+        }
+
+        let app = sel_shared_app(cls_nsapp, sel_shared_id);
+        if !app.is_null() {
+            sel_set_icon(app, sel_set_icon_id, image);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_macos_dock_icon(_png_bytes: &[u8]) {}

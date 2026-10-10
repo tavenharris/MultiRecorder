@@ -183,8 +183,7 @@ impl DeviceManager {
             .output()
             .context("Failed to query macOS audio outputs")?;
 
-        let json_str = String::from_utf8_lossy(&output.stdout);
-        let parsed: serde_json::Value = serde_json::from_str(&json_str)?;
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)?;
 
         let mut outputs = Vec::new();
         let mut seen_names = std::collections::HashSet::new();

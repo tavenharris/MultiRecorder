@@ -5,15 +5,73 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
+
+static RES_REGEX: OnceLock<regex::Regex> = OnceLock::new();
+static FPS_REGEX: OnceLock<regex::Regex> = OnceLock::new();
+
+fn get_res_regex() -> &'static regex::Regex {
+    RES_REGEX.get_or_init(|| regex::Regex::new(r"(\d{3,5}x\d{3,5})").expect("valid resolution regex"))
+}
+
+fn get_fps_regex() -> &'static regex::Regex {
+    FPS_REGEX.get_or_init(|| regex::Regex::new(r"(\d+(?:\.\d+)?)\s*(?:fps|tbr)").expect("valid fps regex"))
+}
+
+fn parse_detected_format(line: &str, default_fps: u32) -> Option<String> {
+    if line.contains("Stream #0:0") && line.contains("Video:") {
+        let res = get_res_regex().captures(line).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+        let fps = get_fps_regex().captures(line).and_then(|c| c.get(1)).map(|m| {
+            let n: f32 = m.as_str().parse().unwrap_or(default_fps as f32);
+            format!("{}fps", n.round() as u32)
+        }).unwrap_or_else(|| format!("{}fps", default_fps));
+        if let Some(res) = res {
+            return Some(format!("{}  {}", res, fps));
+        }
+    }
+    None
+}
+
+#[allow(dead_code)]
+fn stop_child_gracefully(mut child: Child, name: &str, timeout: Duration) {
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"q\n");
+        let _ = stdin.flush();
+    }
+    let start = std::time::Instant::now();
+    let mut exited = false;
+    while start.elapsed() < timeout {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                tracing::info!("Process for [{}] exited with status: {}", name, status);
+                exited = true;
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => {
+                tracing::warn!("Error waiting on process for [{}]: {}", name, e);
+                break;
+            }
+        }
+    }
+    if !exited {
+        tracing::warn!("Process for [{}] did not exit within {:?}; forcing termination...", name, timeout);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
 
 pub struct PreviewStream {
     video_device: String,
     is_screen: bool,
     child: Option<Child>,
     latest_frame: Arc<Mutex<Option<Vec<u8>>>>,
+    frame_seq: Arc<AtomicU64>,
     detected_format: Arc<Mutex<Option<String>>>,
 }
 
@@ -24,6 +82,7 @@ impl PreviewStream {
             is_screen,
             child: None,
             latest_frame: Arc::new(Mutex::new(None)),
+            frame_seq: Arc::new(AtomicU64::new(0)),
             detected_format: Arc::new(Mutex::new(None)),
         }
     }
@@ -51,14 +110,20 @@ impl PreviewStream {
 
         if let Some(stdout) = child.stdout.take() {
             let frame_arc = Arc::clone(&self.latest_frame);
+            let frame_seq = Arc::clone(&self.frame_seq);
             thread::spawn(move || {
                 use std::io::Read;
                 let mut reader = BufReader::with_capacity(320 * 180 * 4 * 2, stdout);
                 let mut buf = vec![0u8; 320 * 180 * 4];
                 while reader.read_exact(&mut buf).is_ok() {
                     if let Ok(mut lock) = frame_arc.lock() {
-                        *lock = Some(buf.clone());
+                        if let Some(existing) = lock.as_mut() {
+                            existing.copy_from_slice(&buf);
+                        } else {
+                            *lock = Some(buf.clone());
+                        }
                     }
+                    frame_seq.fetch_add(1, Ordering::Release);
                 }
             });
         }
@@ -67,20 +132,11 @@ impl PreviewStream {
             let fmt_arc = Arc::clone(&self.detected_format);
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
-                let res_re = regex::Regex::new(r"(\d{3,5}x\d{3,5})").ok();
-                let fps_re = regex::Regex::new(r"(\d+(?:\.\d+)?)\s*(?:fps|tbr)").ok();
                 for line in reader.lines().flatten() {
-                    if line.contains("Stream #0:0") && line.contains("Video:") {
-                        let res = res_re.as_ref().and_then(|r| r.captures(&line)).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
-                        let fps = fps_re.as_ref().and_then(|r| r.captures(&line)).and_then(|c| c.get(1)).map(|m| {
-                            let n: f32 = m.as_str().parse().unwrap_or(30.0);
-                            format!("{}fps", n.round() as u32)
-                        }).unwrap_or_else(|| "30fps".to_string());
-                        if let Some(res) = res {
-                            if let Ok(mut lock) = fmt_arc.lock() {
-                                *lock = Some(format!("{}  {}", res, fps));
-                                break;
-                            }
+                    if let Some(fmt_str) = parse_detected_format(&line, 30) {
+                        if let Ok(mut lock) = fmt_arc.lock() {
+                            *lock = Some(fmt_str);
+                            break;
                         }
                     }
                 }
@@ -93,6 +149,11 @@ impl PreviewStream {
 
     pub fn get_latest_frame(&self) -> Option<Vec<u8>> {
         self.latest_frame.lock().ok().and_then(|f| f.clone())
+    }
+
+    #[allow(dead_code)]
+    pub fn frame_seq(&self) -> u64 {
+        self.frame_seq.load(Ordering::Acquire)
     }
 
     pub fn get_detected_format(&self) -> Option<String> {
@@ -125,6 +186,7 @@ pub struct StreamRecorder {
     recent_logs: Arc<Mutex<VecDeque<String>>>,
     log_file_path: PathBuf,
     latest_frame: Arc<Mutex<Option<Vec<u8>>>>,
+    frame_seq: Arc<AtomicU64>,
     detected_format: Arc<Mutex<Option<String>>>,
 }
 
@@ -148,6 +210,7 @@ impl StreamRecorder {
             recent_logs: Arc::new(Mutex::new(VecDeque::with_capacity(50))),
             log_file_path,
             latest_frame: Arc::new(Mutex::new(None)),
+            frame_seq: Arc::new(AtomicU64::new(0)),
             detected_format: Arc::new(Mutex::new(None)),
         }
     }
@@ -166,6 +229,11 @@ impl StreamRecorder {
 
     pub fn get_latest_frame(&self) -> Option<Vec<u8>> {
         self.latest_frame.lock().ok().and_then(|f| f.clone())
+    }
+
+    #[allow(dead_code)]
+    pub fn frame_seq(&self) -> u64 {
+        self.frame_seq.load(Ordering::Acquire)
     }
 
     pub fn log_file_path(&self) -> &Path {
@@ -327,14 +395,20 @@ impl StreamRecorder {
         // Background thread to continuously read live preview frames from stdout
         if let Some(stdout) = child.stdout.take() {
             let frame_arc = Arc::clone(&self.latest_frame);
+            let frame_seq = Arc::clone(&self.frame_seq);
             thread::spawn(move || {
                 use std::io::Read;
                 let mut reader = BufReader::with_capacity(320 * 180 * 4 * 2, stdout);
                 let mut buf = vec![0u8; 320 * 180 * 4];
                 while reader.read_exact(&mut buf).is_ok() {
                     if let Ok(mut lock) = frame_arc.lock() {
-                        *lock = Some(buf.clone());
+                        if let Some(existing) = lock.as_mut() {
+                            existing.copy_from_slice(&buf);
+                        } else {
+                            *lock = Some(buf.clone());
+                        }
                     }
+                    frame_seq.fetch_add(1, Ordering::Release);
                 }
             });
         }
@@ -348,24 +422,15 @@ impl StreamRecorder {
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 let mut file_out = File::create(&log_path).ok();
-                let res_re = regex::Regex::new(r"(\d{3,5}x\d{3,5})").ok();
-                let fps_re = regex::Regex::new(r"(\d+(?:\.\d+)?)\s*(?:fps|tbr)").ok();
 
                 for line in reader.lines().flatten() {
                     if let Some(f) = file_out.as_mut() {
                         let _ = writeln!(f, "{}", line);
                     }
 
-                    if line.contains("Stream #0:0") && line.contains("Video:") {
-                        let res = res_re.as_ref().and_then(|r| r.captures(&line)).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
-                        let fps = fps_re.as_ref().and_then(|r| r.captures(&line)).and_then(|c| c.get(1)).map(|m| {
-                            let n: f32 = m.as_str().parse().unwrap_or(60.0);
-                            format!("{}fps", n.round() as u32)
-                        }).unwrap_or_else(|| "60fps".to_string());
-                        if let Some(res) = res {
-                            if let Ok(mut lock) = fmt_arc.lock() {
-                                *lock = Some(format!("{}  {}", res, fps));
-                            }
+                    if let Some(fmt_str) = parse_detected_format(&line, 60) {
+                        if let Ok(mut lock) = fmt_arc.lock() {
+                            *lock = Some(fmt_str);
                         }
                     }
 
@@ -393,16 +458,8 @@ impl StreamRecorder {
             match child.try_wait()? {
                 Some(status) => {
                     let recent = self.get_recent_logs();
-                    let err_summary = recent
-                        .iter()
-                        .rev()
-                        .take(5)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                    let start = recent.len().saturating_sub(5);
+                    let err_summary = recent[start..].join("\n");
 
                     bail!(
                         "Stream [{}] stopped unexpectedly (exit: {}).\nLast log lines:\n{}",
@@ -431,12 +488,9 @@ impl StreamRecorder {
     }
 
     pub fn stop(&mut self) -> Result<()> {
-        if let Some(mut child) = self.child.take() {
+        if let Some(child) = self.child.take() {
             tracing::info!("Stopping recorder for source [{}]...", self.source.name);
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(b"q\n");
-            }
-            let _ = child.wait();
+            stop_child_gracefully(child, &self.source.name, Duration::from_secs(3));
         }
         Ok(())
     }
