@@ -477,6 +477,9 @@ impl Drop for StreamRecorder {
 }
 
 pub struct AudioTrackMonitor {
+    #[cfg(target_os = "windows")]
+    _stream: Option<cpal::Stream>,
+    #[cfg(not(target_os = "windows"))]
     child: Option<Child>,
     peak_level: Arc<AtomicU32>, // (0..10000)
     device_identifier: String,
@@ -490,41 +493,51 @@ impl AudioTrackMonitor {
         let device_index = identifier.parse::<usize>().unwrap_or(0);
         let peak_level = Arc::new(AtomicU32::new(0));
 
-        let mut cmd = Command::new("ffmpeg");
-        cmd.arg("-y");
-        cmd.args(crate::platform::CurrentPlatform.build_audio_monitor_args(&identifier));
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
+        #[cfg(target_os = "windows")]
+        let stream = crate::platform::windows::start_cpal_monitor(&identifier, Arc::clone(&peak_level));
 
-        let mut child = cmd.spawn().ok();
+        #[cfg(not(target_os = "windows"))]
+        let child = {
+            let mut cmd = Command::new("ffmpeg");
+            cmd.arg("-y");
+            cmd.args(crate::platform::CurrentPlatform.build_audio_monitor_args(&identifier));
+            cmd.stdin(Stdio::piped());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::null());
 
-        if let Some(ch) = child.as_mut() {
-            if let Some(stdout) = ch.stdout.take() {
-                let peak_clone = Arc::clone(&peak_level);
-                thread::spawn(move || {
-                    use std::io::Read;
-                    let mut reader = BufReader::with_capacity(1024, stdout);
-                    let mut buf = [0u8; 1024]; // 256 samples of 8kHz f32 = 32ms
-                    while reader.read_exact(&mut buf).is_ok() {
-                        let mut max_abs: f32 = 0.0;
-                        for chunk in buf.chunks_exact(4) {
-                            let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).abs();
-                            if sample > max_abs {
-                                max_abs = sample;
+            let mut child = cmd.spawn().ok();
+
+            if let Some(ch) = child.as_mut() {
+                if let Some(stdout) = ch.stdout.take() {
+                    let peak_clone = Arc::clone(&peak_level);
+                    thread::spawn(move || {
+                        use std::io::Read;
+                        let mut reader = BufReader::with_capacity(1024, stdout);
+                        let mut buf = [0u8; 1024]; // 256 samples of 8kHz f32 = 32ms
+                        while reader.read_exact(&mut buf).is_ok() {
+                            let mut max_abs: f32 = 0.0;
+                            for chunk in buf.chunks_exact(4) {
+                                let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).abs();
+                                if sample > max_abs {
+                                    max_abs = sample;
+                                }
                             }
+                            // Scale response slightly so natural speech is well-represented in the green/amber zones
+                            let boost = (max_abs * 2.5).clamp(0.0, 1.0);
+                            let int_val = (boost * 10000.0) as u32;
+                            peak_clone.store(int_val, Ordering::Relaxed);
                         }
-                        // Scale response slightly so natural speech is well-represented in the green/amber zones
-                        let boost = (max_abs * 2.5).clamp(0.0, 1.0);
-                        let int_val = (boost * 10000.0) as u32;
-                        peak_clone.store(int_val, Ordering::Relaxed);
-                    }
-                    peak_clone.store(0, Ordering::Relaxed);
-                });
+                        peak_clone.store(0, Ordering::Relaxed);
+                    });
+                }
             }
-        }
+            child
+        };
 
         Self {
+            #[cfg(target_os = "windows")]
+            _stream: stream,
+            #[cfg(not(target_os = "windows"))]
             child,
             peak_level,
             device_identifier: identifier,
@@ -542,14 +555,24 @@ impl AudioTrackMonitor {
     }
 
     pub fn get_peak(&self) -> f32 {
+        #[cfg(target_os = "windows")]
+        let val = self.peak_level.swap(0, Ordering::Relaxed);
+        #[cfg(not(target_os = "windows"))]
         let val = self.peak_level.load(Ordering::Relaxed);
         (val as f32) / 10000.0
     }
 
     pub fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        #[cfg(target_os = "windows")]
+        {
+            self._stream = None;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
     }
 }

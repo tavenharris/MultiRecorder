@@ -331,3 +331,15 @@ fn test_cross_platform_hal_command_generation() {
     assert!(win_mic_mon.contains(&"dshow".to_string()));
     assert!(win_mic_mon.contains(&"audio=Microphone Array".to_string()));
 }
+
+#[test]
+fn test_audio_track_monitor_lifecycle() {
+    use multirecording::recorder::AudioTrackMonitor;
+
+    let mut monitor = AudioTrackMonitor::new("wasapi");
+    assert_eq!(monitor.device_identifier(), "wasapi");
+    let peak = monitor.get_peak();
+    assert!(peak >= 0.0 && peak <= 1.0);
+    monitor.stop();
+}
+

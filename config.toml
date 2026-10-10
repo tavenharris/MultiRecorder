@@ -10,15 +10,15 @@ embed_timecode = true
 [[sources]]
 name = "gameplay"
 video_device = "1"
-fps = 60
+fps = 30
 video_bitrate = "30M"
-encoder = "h264_videotoolbox"
+encoder = "h264_nvenc"
 
 [[sources]]
 name = "facecam"
 video_device = "0"
 video_bitrate = "8M"
-encoder = "h264_videotoolbox"
+encoder = "h264_nvenc"
 
 [[audio_tracks]]
 enabled = true

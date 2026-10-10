@@ -2,9 +2,11 @@ use super::CapturePlatform;
 use crate::config::AudioTrackConfig;
 use crate::devices::{Device, DeviceType};
 use anyhow::Result;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// Check if ffmpeg is accessible in the current process's PATH.
 /// If not, searches the user's persistent Windows registry PATH (HKCU\Environment\Path)
@@ -142,66 +144,125 @@ impl WindowsPlatform {
         });
 
         // 2. Discover DirectShow video and audio devices via FFmpeg
-        match Command::new("ffmpeg")
+        let (dshow_videos, dshow_audios) = match Command::new("ffmpeg")
             .args(["-f", "dshow", "-list_devices", "true", "-i", "dummy"])
             .output()
         {
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                let (dshow_videos, dshow_audios) = parse_dshow_devices(&stderr);
-
-                // Add DirectShow video devices (webcams, capture cards)
-                for (i, v_name) in dshow_videos.into_iter().enumerate() {
-                    let lower = v_name.to_lowercase();
-                    let is_cam = lower.contains("cam") || lower.contains("face");
-                    let fps = if is_cam { 30 } else { 60 };
-                    devices.push(Device {
-                        id: v_name.clone(),
-                        index: i + 1,
-                        name: v_name,
-                        device_type: DeviceType::Video,
-                        av_index: None,
-                        resolution: Some("1920x1080".to_string()),
-                        fps: Some(fps),
-                    });
-                }
-
-                // 3. Audio Outputs: WASAPI loopback device for desktop speaker/headphone recording
-                devices.push(Device {
-                    id: "wasapi".to_string(),
-                    index: 0,
-                    name: "Desktop Audio (WASAPI Loopback)".to_string(),
-                    device_type: DeviceType::AudioOutput,
-                    av_index: Some(0),
-                    resolution: None,
-                    fps: None,
-                });
-
-                // 4. Audio Inputs: DirectShow microphone / input devices
-                for (i, a_name) in dshow_audios.into_iter().enumerate() {
-                    devices.push(Device {
-                        id: a_name.clone(),
-                        index: i,
-                        name: a_name,
-                        device_type: DeviceType::AudioInput,
-                        av_index: Some(i),
-                        resolution: None,
-                        fps: None,
-                    });
-                }
+                parse_dshow_devices(&stderr)
             }
             Err(e) => {
-                // Preserve synthetic devices even if ffmpeg failed
+                eprintln!("[MultiRecording] Warning: DirectShow discovery via FFmpeg failed: {e}. Ensure FFmpeg is installed.");
+                (Vec::new(), Vec::new())
+            }
+        };
+
+        // Add DirectShow video devices (webcams, capture cards)
+        for (i, v_name) in dshow_videos.into_iter().enumerate() {
+            let lower = v_name.to_lowercase();
+            let is_cam = lower.contains("cam") || lower.contains("face");
+            let fps = if is_cam { 30 } else { 60 };
+            devices.push(Device {
+                id: v_name.clone(),
+                index: i + 1,
+                name: v_name,
+                device_type: DeviceType::Video,
+                av_index: None,
+                resolution: Some("1920x1080".to_string()),
+                fps: Some(fps),
+            });
+        }
+
+        // 3. Audio Outputs: Query CPAL for real endpoints (Monitors, Speakers, Headphones)
+        let host = cpal::default_host();
+        let default_out_name = host
+            .default_output_device()
+            .and_then(|d| d.description().ok())
+            .map(|desc| desc.name().to_string());
+
+        let mut out_idx = 0;
+        let mut added_outputs = Vec::new();
+
+        if let Ok(outputs) = host.output_devices() {
+            for dev in outputs {
+                if let Ok(desc) = dev.description() {
+                    let name = desc.name().to_string();
+                    if !added_outputs.contains(&name) {
+                        added_outputs.push(name.clone());
+                        let is_default = default_out_name.as_deref() == Some(&name);
+                        let display_name = if is_default {
+                            format!("{} (Default Output)", name)
+                        } else {
+                            name.clone()
+                        };
+                        devices.push(Device {
+                            id: name.clone(),
+                            index: out_idx,
+                            name: display_name,
+                            device_type: DeviceType::AudioOutput,
+                            av_index: None,
+                            resolution: None,
+                            fps: None,
+                        });
+                        out_idx += 1;
+                    }
+                }
+            }
+        }
+
+        // Always ensure a fallback WASAPI loopback device exists if none were enumerated or as generic alias
+        devices.push(Device {
+            id: "wasapi".to_string(),
+            index: out_idx,
+            name: match &default_out_name {
+                Some(name) => format!("Desktop Audio (Default Output: {})", name),
+                None => "Desktop Audio (WASAPI Loopback)".to_string(),
+            },
+            device_type: DeviceType::AudioOutput,
+            av_index: None,
+            resolution: None,
+            fps: None,
+        });
+
+        // 4. Audio Inputs: DirectShow microphone / input devices + CPAL inputs
+        let mut in_idx = 0;
+        let mut added_inputs = Vec::new();
+
+        for a_name in dshow_audios {
+            if !added_inputs.contains(&a_name) {
+                added_inputs.push(a_name.clone());
                 devices.push(Device {
-                    id: "wasapi".to_string(),
-                    index: 0,
-                    name: "Desktop Audio (WASAPI Loopback)".to_string(),
-                    device_type: DeviceType::AudioOutput,
-                    av_index: Some(0),
+                    id: a_name.clone(),
+                    index: in_idx,
+                    name: a_name,
+                    device_type: DeviceType::AudioInput,
+                    av_index: None,
                     resolution: None,
                     fps: None,
                 });
-                eprintln!("[MultiRecording] Warning: DirectShow discovery via FFmpeg failed: {e}. Ensure FFmpeg is installed.");
+                in_idx += 1;
+            }
+        }
+
+        if let Ok(inputs) = host.input_devices() {
+            for dev in inputs {
+                if let Ok(desc) = dev.description() {
+                    let name = desc.name().to_string();
+                    if !added_inputs.contains(&name) {
+                        added_inputs.push(name.clone());
+                        devices.push(Device {
+                            id: name.clone(),
+                            index: in_idx,
+                            name,
+                            device_type: DeviceType::AudioInput,
+                            av_index: None,
+                            resolution: None,
+                            fps: None,
+                        });
+                        in_idx += 1;
+                    }
+                }
             }
         }
 
@@ -463,6 +524,160 @@ impl CapturePlatform for WindowsPlatform {
 
     fn available_encoders(&self) -> &'static [(&'static str, &'static str)] {
         self.available_encoders()
+    }
+}
+
+/// Spawns a real-time audio monitor stream using native Windows CoreAudio WASAPI loopback or capture via CPAL.
+/// Monitors peak levels directly without spawning external subprocesses.
+pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal::Stream> {
+    let host = cpal::default_host();
+    let clean_id = identifier
+        .strip_prefix("out:")
+        .or_else(|| identifier.strip_prefix("audio="))
+        .or_else(|| identifier.strip_prefix("in:"))
+        .unwrap_or(identifier)
+        .trim();
+
+    let is_output_request = clean_id.eq_ignore_ascii_case("wasapi")
+        || clean_id.eq_ignore_ascii_case("default")
+        || clean_id.to_lowercase().contains("desktop")
+        || clean_id.to_lowercase().contains("speaker")
+        || identifier.starts_with("out:");
+
+    let mut target_device = None;
+    let mut is_loopback = false;
+
+    if is_output_request {
+        // Try to match output device by name
+        if let Ok(outputs) = host.output_devices() {
+            for dev in outputs {
+                if let Ok(desc) = dev.description() {
+                    let d_name = desc.name();
+                    if clean_id.eq_ignore_ascii_case(&d_name)
+                        || d_name.to_lowercase().contains(&clean_id.to_lowercase())
+                        || clean_id.to_lowercase().contains(&d_name.to_lowercase())
+                    {
+                        target_device = Some(dev);
+                        is_loopback = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if target_device.is_none() {
+            target_device = host.default_output_device();
+            is_loopback = true;
+        }
+    } else {
+        // Try to match input device (microphone)
+        if let Ok(inputs) = host.input_devices() {
+            for dev in inputs {
+                if let Ok(desc) = dev.description() {
+                    let d_name = desc.name();
+                    if clean_id.eq_ignore_ascii_case(&d_name)
+                        || d_name.to_lowercase().contains(&clean_id.to_lowercase())
+                        || clean_id.to_lowercase().contains(&d_name.to_lowercase())
+                    {
+                        target_device = Some(dev);
+                        is_loopback = false;
+                        break;
+                    }
+                }
+            }
+        }
+        // If not found in inputs, try outputs (user might have selected a playback device)
+        if target_device.is_none() {
+            if let Ok(outputs) = host.output_devices() {
+                for dev in outputs {
+                    if let Ok(desc) = dev.description() {
+                        let d_name = desc.name();
+                        if clean_id.eq_ignore_ascii_case(&d_name)
+                            || d_name.to_lowercase().contains(&clean_id.to_lowercase())
+                            || clean_id.to_lowercase().contains(&d_name.to_lowercase())
+                        {
+                            target_device = Some(dev);
+                            is_loopback = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback to default output
+        if target_device.is_none() {
+            target_device = host.default_output_device();
+            is_loopback = true;
+        }
+    }
+
+    let dev = target_device?;
+
+    let supported_config = if is_loopback {
+        dev.default_output_config().ok()?
+    } else {
+        dev.default_input_config().ok()?
+    };
+
+    let sample_format = supported_config.sample_format();
+    let stream_config: cpal::StreamConfig = supported_config.into();
+
+    let peak_clone = Arc::clone(&peak);
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => dev.build_input_stream(
+            stream_config,
+            move |data: &[f32], _| {
+                let mut max_abs: f32 = 0.0;
+                for &s in data {
+                    let a = s.abs();
+                    if a > max_abs {
+                        max_abs = a;
+                    }
+                }
+                let boost = (max_abs * 2.5).clamp(0.0, 1.0);
+                peak_clone.store((boost * 10000.0) as u32, Ordering::Relaxed);
+            },
+            |err| eprintln!("[MultiRecording] Audio monitor stream error: {:?}", err),
+            None,
+        ),
+        cpal::SampleFormat::I16 => dev.build_input_stream(
+            stream_config,
+            move |data: &[i16], _| {
+                let mut max_abs: f32 = 0.0;
+                for &s in data {
+                    let a = (s as f32 / 32768.0).abs();
+                    if a > max_abs {
+                        max_abs = a;
+                    }
+                }
+                let boost = (max_abs * 2.5).clamp(0.0, 1.0);
+                peak_clone.store((boost * 10000.0) as u32, Ordering::Relaxed);
+            },
+            |err| eprintln!("[MultiRecording] Audio monitor stream error: {:?}", err),
+            None,
+        ),
+        cpal::SampleFormat::U16 => dev.build_input_stream(
+            stream_config,
+            move |data: &[u16], _| {
+                let mut max_abs: f32 = 0.0;
+                for &s in data {
+                    let a = ((s as f32 - 32768.0) / 32768.0).abs();
+                    if a > max_abs {
+                        max_abs = a;
+                    }
+                }
+                let boost = (max_abs * 2.5).clamp(0.0, 1.0);
+                peak_clone.store((boost * 10000.0) as u32, Ordering::Relaxed);
+            },
+            |err| eprintln!("[MultiRecording] Audio monitor stream error: {:?}", err),
+            None,
+        ),
+        _ => return None,
+    }.ok()?;
+
+    if stream.play().is_ok() {
+        Some(stream)
+    } else {
+        None
     }
 }
 

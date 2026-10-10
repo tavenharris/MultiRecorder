@@ -159,7 +159,24 @@ impl MultiRecordingApp {
             let track = self.config.audio_tracks.get(i);
             if let Some(track) = track {
                 if track.enabled {
-                    if let Some(dev) = self.discovered_devices.iter().find(|d| d.id == track.device_id) {
+                    let found_dev = self.discovered_devices.iter().find(|d| d.id == track.device_id)
+                        .or_else(|| {
+                            let clean = track.device_id
+                                .strip_prefix("out:")
+                                .or_else(|| track.device_id.strip_prefix("in:"))
+                                .or_else(|| track.device_id.strip_prefix("audio="))
+                                .unwrap_or(&track.device_id);
+                            self.discovered_devices.iter().find(|d| d.id == clean || d.name.contains(clean))
+                        })
+                        .or_else(|| {
+                            if track.device_id == "wasapi" || track.device_id == "default" || track.name.to_lowercase().contains("desktop") {
+                                self.discovered_devices.iter().find(|d| d.device_type == DeviceType::AudioOutput)
+                            } else {
+                                None
+                            }
+                        });
+
+                    if let Some(dev) = found_dev {
                         let monitor_id = if let Some(av_idx) = dev.av_index {
                             av_idx.to_string()
                         } else {
