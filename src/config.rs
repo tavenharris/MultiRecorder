@@ -114,7 +114,7 @@ pub fn default_audio_tracks() -> Vec<AudioTrackConfig> {
 impl Default for Config {
     fn default() -> Self {
         let output_dir = PathBuf::from("recordings");
-        let buffer_dir = PathBuf::from("/tmp").join("multirecording_buffer");
+        let buffer_dir = std::env::temp_dir().join("multirecording_buffer");
 
         Self {
             buffer_duration_secs: 300, // 5 minutes default
@@ -128,7 +128,7 @@ impl Default for Config {
                     resolution: Some("1920x1080".to_string()),
                     fps: Some(60),
                     video_bitrate: "40M".to_string(),
-                    encoder: "h264_videotoolbox".to_string(),
+                    encoder: crate::platform::CurrentPlatform.default_video_encoder().to_string(),
                 },
                 SourceConfig {
                     name: "facecam".to_string(),
@@ -136,7 +136,7 @@ impl Default for Config {
                     resolution: Some("1920x1080".to_string()),
                     fps: Some(60),
                     video_bitrate: "15M".to_string(),
-                    encoder: "h264_videotoolbox".to_string(),
+                    encoder: crate::platform::CurrentPlatform.default_video_encoder().to_string(),
                 },
             ],
             audio_tracks: default_audio_tracks(),

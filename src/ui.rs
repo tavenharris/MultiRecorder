@@ -73,6 +73,15 @@ impl MultiRecordingApp {
         let devices = DeviceManager::list_devices().unwrap_or_default();
         let has_loopback = DeviceManager::has_loopback_device(&devices);
         let selected_secs = cfg.buffer_duration_secs;
+        let initial_status = if devices.is_empty() {
+            Some((
+                "⚠️ No capture devices found. Please ensure FFmpeg is installed and accessible in PATH.".to_string(),
+                Instant::now(),
+                true,
+            ))
+        } else {
+            None
+        };
 
         let mut app = Self {
             config: cfg,
@@ -89,7 +98,7 @@ impl MultiRecordingApp {
             preview_texture_2: None,
             last_preview_seq_1: 0,
             last_preview_seq_2: 0,
-            status_message: None,
+            status_message: initial_status,
             recent_exports: Vec::new(),
             selected_flashback_secs: selected_secs,
             show_settings: false,
@@ -108,21 +117,41 @@ impl MultiRecordingApp {
     }
 
     pub fn refresh_devices(&mut self) {
-        self.discovered_devices = DeviceManager::list_devices().unwrap_or_default();
-        self.has_loopback = DeviceManager::has_loopback_device(&self.discovered_devices);
-        self.sync_device_selections();
-        self.sync_audio_monitors();
-        self.stop_preview_streams();
-        self.ensure_preview_streams();
-        self.status_message = Some((
-            format!(
-                "Devices refreshed: {} sources found (Loopback: {})",
-                self.discovered_devices.len(),
-                if self.has_loopback { "Active" } else { "Not Installed" }
-            ),
-            Instant::now(),
-            false,
-        ));
+        match DeviceManager::list_devices() {
+            Ok(devices) => {
+                let count = devices.len();
+                self.discovered_devices = devices;
+                self.has_loopback = DeviceManager::has_loopback_device(&self.discovered_devices);
+                self.sync_device_selections();
+                self.sync_audio_monitors();
+                self.stop_preview_streams();
+                self.ensure_preview_streams();
+                if count == 0 {
+                    self.status_message = Some((
+                        "⚠️ 0 devices discovered. Please ensure FFmpeg is installed and accessible in PATH.".to_string(),
+                        Instant::now(),
+                        true,
+                    ));
+                } else {
+                    self.status_message = Some((
+                        format!(
+                            "Devices refreshed: {} sources found (Loopback: {})",
+                            count,
+                            if self.has_loopback { "Active" } else { "Not Installed" }
+                        ),
+                        Instant::now(),
+                        false,
+                    ));
+                }
+            }
+            Err(e) => {
+                self.status_message = Some((
+                    format!("⚠️ Device discovery error: {e}"),
+                    Instant::now(),
+                    true,
+                ));
+            }
+        }
     }
 
     pub fn sync_audio_monitors(&mut self) {
@@ -131,19 +160,22 @@ impl MultiRecordingApp {
             if let Some(track) = track {
                 if track.enabled {
                     if let Some(dev) = self.discovered_devices.iter().find(|d| d.id == track.device_id) {
-                        if let Some(av_idx) = dev.av_index {
-                            let need_spawn = match &self.audio_monitors[i] {
-                                Some(m) => m.device_index() != av_idx,
-                                None => true,
-                            };
-                            if need_spawn {
-                                if let Some(mut old) = self.audio_monitors[i].take() {
-                                    old.stop();
-                                }
-                                self.audio_monitors[i] = Some(AudioTrackMonitor::new(av_idx));
+                        let monitor_id = if let Some(av_idx) = dev.av_index {
+                            av_idx.to_string()
+                        } else {
+                            dev.id.clone()
+                        };
+                        let need_spawn = match &self.audio_monitors[i] {
+                            Some(m) => m.device_identifier() != monitor_id,
+                            None => true,
+                        };
+                        if need_spawn {
+                            if let Some(mut old) = self.audio_monitors[i].take() {
+                                old.stop();
                             }
-                            continue;
+                            self.audio_monitors[i] = Some(AudioTrackMonitor::new(monitor_id));
                         }
+                        continue;
                     }
                 }
             }
@@ -161,7 +193,7 @@ impl MultiRecordingApp {
         }
 
         // Preview stream 1
-        let dev1 = self.game_video_idx.to_string();
+        let dev1 = self.video_devices().into_iter().find(|d| d.index == self.game_video_idx).map(|d| d.id.clone()).unwrap_or_else(|| self.game_video_idx.to_string());
         if self.preview_stream_1.is_none() {
             let is_screen = self.video_devices().iter().find(|d| d.index == self.game_video_idx).map(|d| d.name.to_lowercase().contains("screen")).unwrap_or(false);
             let mut ps1 = PreviewStream::new(dev1, is_screen);
@@ -170,7 +202,7 @@ impl MultiRecordingApp {
         }
 
         // Preview stream 2 (only if distinct video device)
-        let dev2 = self.cam_video_idx.to_string();
+        let dev2 = self.video_devices().into_iter().find(|d| d.index == self.cam_video_idx).map(|d| d.id.clone()).unwrap_or_else(|| self.cam_video_idx.to_string());
         if self.cam_video_idx != self.game_video_idx && self.preview_stream_2.is_none() {
             let is_screen = self.video_devices().iter().find(|d| d.index == self.cam_video_idx).map(|d| d.name.to_lowercase().contains("screen")).unwrap_or(false);
             let mut ps2 = PreviewStream::new(dev2, is_screen);
@@ -265,7 +297,7 @@ impl MultiRecordingApp {
                 resolution: Some("1920x1080".to_string()),
                 fps: Some(60),
                 video_bitrate: if idx == 0 { "40M".to_string() } else { "15M".to_string() },
-                encoder: "h264_videotoolbox".to_string(),
+                encoder: crate::platform::CurrentPlatform.default_video_encoder().to_string(),
             });
         }
 
@@ -566,11 +598,14 @@ impl MultiRecordingApp {
         let _ = fs::create_dir_all(&self.config.output_dir);
 
         // Sync dropdown selections into config
+        let dev_id1 = self.video_devices().into_iter().find(|d| d.index == self.game_video_idx).map(|d| d.id.clone()).unwrap_or_else(|| self.game_video_idx.to_string());
+        let dev_id2 = self.video_devices().into_iter().find(|d| d.index == self.cam_video_idx).map(|d| d.id.clone()).unwrap_or_else(|| self.cam_video_idx.to_string());
+
         if let Some(src1) = self.config.sources.first_mut() {
-            src1.video_device = self.game_video_idx.to_string();
+            src1.video_device = dev_id1;
         }
         if self.config.sources.len() > 1 {
-            self.config.sources[1].video_device = self.cam_video_idx.to_string();
+            self.config.sources[1].video_device = dev_id2;
         }
 
         // Map audio device indices
@@ -1395,21 +1430,15 @@ impl MultiRecordingApp {
                         }
 
                         if ui.add(egui::Button::new(RichText::new("📂 Browse...").size(11.0))).clicked() {
-                            if let Ok(out) = Command::new("osascript")
-                                .args(["-e", "POSIX path of (choose folder with prompt \"Select Recordings Destination\")"])
-                                .output()
-                            {
-                                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                                if !p.is_empty() {
-                                    self.config.output_dir = PathBuf::from(p);
-                                    let _ = self.config.save_to_file(&self.config_path);
-                                }
+                            if let Some(p) = crate::platform::pick_folder() {
+                                self.config.output_dir = p;
+                                let _ = self.config.save_to_file(&self.config_path);
                             }
                         }
 
                         if ui.add(egui::Button::new(RichText::new("Reveal").size(11.0))).clicked() {
                             let _ = fs::create_dir_all(&self.config.output_dir);
-                            let _ = Command::new("open").arg(&self.config.output_dir).spawn();
+                            crate::platform::reveal_path(&self.config.output_dir);
                         }
                     });
 
@@ -1420,12 +1449,8 @@ impl MultiRecordingApp {
                     // --- Row 2: Video Encoder & Bitrates ---
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("🎬 Video Encoder:").strong().color(Color32::from_rgb(244, 244, 245)));
-                        let current_enc = self.config.sources.first().map(|s| s.encoder.clone()).unwrap_or_else(|| "h264_videotoolbox".to_string());
-                        for &(enc, label) in &[
-                            ("h264_videotoolbox", "Apple H.264 (Hardware)"),
-                            ("hevc_videotoolbox", "Apple HEVC / H.265"),
-                            ("libx264", "libx264 (CPU)"),
-                        ] {
+                        let current_enc = self.config.sources.first().map(|s| s.encoder.clone()).unwrap_or_else(|| crate::platform::CurrentPlatform.default_video_encoder().to_string());
+                        for &(enc, label) in crate::platform::CurrentPlatform.available_encoders() {
                             let is_cur = current_enc == enc;
                             let btn_color = if is_cur { Color32::from_rgb(99, 102, 241) } else { Color32::from_rgb(45, 45, 52) };
                             if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE).size(11.0)).fill(btn_color)).clicked() {
@@ -1602,7 +1627,7 @@ impl MultiRecordingApp {
                                 ui.label(RichText::new(format!("({}s / {:.1} MB)", exp.duration_secs, exp.size_mb)).size(10.0).color(Color32::from_rgb(113, 113, 122)));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.add(egui::Button::new(RichText::new("Reveal").size(10.0))).clicked() {
-                                        let _ = Command::new("open").args(["-R", &exp.path.to_string_lossy()]).spawn();
+                                        crate::platform::reveal_file(&exp.path);
                                     }
                                 });
                             });
@@ -1614,7 +1639,7 @@ impl MultiRecordingApp {
                         ui.horizontal(|ui| {
                             for rec in &self.recorders {
                                 if ui.add(egui::Button::new(RichText::new(format!("Open [{}] Log", rec.source_name())).size(10.0))).clicked() {
-                                    let _ = Command::new("open").arg("-a").arg("TextEdit").arg(rec.log_file_path()).spawn();
+                                    crate::platform::open_text_file(rec.log_file_path());
                                 }
                             }
                         });

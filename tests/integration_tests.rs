@@ -264,3 +264,70 @@ fn test_input_format_parsing_and_fps_constraints() {
     assert_eq!(fps_2, 60);
     assert_eq!(60u32.min(fps_2), 60);
 }
+
+#[test]
+fn test_cross_platform_hal_command_generation() {
+    use multirecording::platform::macos::MacOSPlatform;
+    use multirecording::platform::windows::WindowsPlatform;
+    use multirecording::platform::CapturePlatform;
+
+    let mac: &dyn CapturePlatform = &MacOSPlatform;
+    let win: &dyn CapturePlatform = &WindowsPlatform;
+
+    // Preview stream commands
+    let mac_prev = mac.build_preview_input_args("0");
+    assert!(mac_prev.contains(&"avfoundation".to_string()));
+    assert!(mac_prev.contains(&"0:none".to_string()));
+
+    let win_desk_prev = win.build_preview_input_args("desktop");
+    assert!(win_desk_prev.contains(&"gdigrab".to_string()));
+    assert!(win_desk_prev.contains(&"desktop".to_string()));
+    assert!(win_desk_prev.contains(&"-an".to_string()));
+
+    let win_cam_prev = win.build_preview_input_args("Integrated Camera");
+    assert!(win_cam_prev.contains(&"dshow".to_string()));
+    assert!(win_cam_prev.contains(&"video=Integrated Camera".to_string()));
+    assert!(win_cam_prev.contains(&"-an".to_string()));
+
+    // Recording input commands with discrete audio routing
+    let tracks = vec![
+        AudioTrackConfig {
+            enabled: true,
+            name: "Microphone".to_string(),
+            device_index: 0,
+            device_id: "in:0".to_string(),
+        },
+        AudioTrackConfig {
+            enabled: true,
+            name: "Desktop Audio".to_string(),
+            device_index: 1,
+            device_id: "wasapi".to_string(),
+        },
+    ];
+
+    let mac_rec = mac.build_recording_input_args("0", 60, &tracks);
+    assert_eq!(mac.audio_input_index(0), 0);
+    assert_eq!(mac.audio_input_index(1), 1);
+    assert!(mac_rec.contains(&"0:0".to_string()));
+    assert!(mac_rec.contains(&"none:1".to_string()));
+
+    let win_rec = win.build_recording_input_args("desktop", 60, &tracks);
+    assert_eq!(win.audio_input_index(0), 1);
+    assert_eq!(win.audio_input_index(1), 2);
+    assert!(win_rec.contains(&"desktop".to_string()));
+    assert!(win_rec.contains(&"wasapi".to_string()));
+    assert!(win_rec.contains(&"default".to_string()));
+
+    // Audio VU meter monitor commands
+    let mac_mon = mac.build_audio_monitor_args("0");
+    assert!(mac_mon.contains(&"none:0".to_string()));
+    assert!(mac_mon.contains(&"f32le".to_string()));
+
+    let win_wasapi_mon = win.build_audio_monitor_args("wasapi");
+    assert!(win_wasapi_mon.contains(&"wasapi".to_string()));
+    assert!(win_wasapi_mon.contains(&"default".to_string()));
+
+    let win_mic_mon = win.build_audio_monitor_args("Microphone Array");
+    assert!(win_mic_mon.contains(&"dshow".to_string()));
+    assert!(win_mic_mon.contains(&"audio=Microphone Array".to_string()));
+}

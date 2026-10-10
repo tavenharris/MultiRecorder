@@ -68,6 +68,7 @@ fn stop_child_gracefully(mut child: Child, name: &str, timeout: Duration) {
 
 pub struct PreviewStream {
     video_device: String,
+    #[allow(dead_code)]
     is_screen: bool,
     child: Option<Child>,
     latest_frame: Arc<Mutex<Option<Vec<u8>>>>,
@@ -89,12 +90,9 @@ impl PreviewStream {
 
     pub fn start(&mut self) -> Result<()> {
         let mut cmd = Command::new("ffmpeg");
-        let framerate = if self.is_screen { "60" } else { "30" };
+        cmd.arg("-y");
+        cmd.args(crate::platform::CurrentPlatform.build_preview_input_args(&self.video_device));
         cmd.args([
-            "-y",
-            "-f", "avfoundation",
-            "-framerate", framerate,
-            "-i", &format!("{}:none", self.video_device),
             "-vf", "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,fps=15",
             "-f", "rawvideo",
             "-pix_fmt", "rgba",
@@ -197,7 +195,7 @@ impl StreamRecorder {
         segment_duration_secs: u64,
         audio_bitrate: String,
     ) -> Self {
-        let log_dir = PathBuf::from("/tmp/multirecording_logs");
+        let log_dir = std::env::temp_dir().join("multirecording_logs");
         let _ = fs::create_dir_all(&log_dir);
         let log_file_path = log_dir.join(format!("{}.log", source.name));
 
@@ -262,37 +260,12 @@ impl StreamRecorder {
         let mut cmd = Command::new("ffmpeg");
         cmd.args(["-y"]);
 
-        // Input 0: Video device + first enabled audio device (if any)
-        // Pass exact hardware-supported framerate (30 for webcams, up to 60 for capture cards/screen)
-        if let Some(first_track) = enabled_tracks.first() {
-            cmd.args([
-                "-f",
-                "avfoundation",
-                "-framerate",
-                &in_fps.to_string(),
-                "-i",
-                &format!("{}:{}", self.source.video_device, first_track.device_index),
-            ]);
-        } else {
-            cmd.args([
-                "-f",
-                "avfoundation",
-                "-framerate",
-                &in_fps.to_string(),
-                "-i",
-                &format!("{}:none", self.source.video_device),
-            ]);
-        }
-
-        // Inputs 1..N: Additional audio devices (Tracks 2..5)
-        for track in enabled_tracks.iter().skip(1) {
-            cmd.args([
-                "-f",
-                "avfoundation",
-                "-i",
-                &format!("none:{}", track.device_index),
-            ]);
-        }
+        let enabled_configs: Vec<AudioTrackConfig> = enabled_tracks.iter().map(|&t| t.clone()).collect();
+        cmd.args(crate::platform::CurrentPlatform.build_recording_input_args(
+            &self.source.video_device,
+            in_fps,
+            &enabled_configs,
+        ));
 
         // Filter complex: split video into [rec] and [prev] with locked 16:9 aspect ratio and padding
         let filter_str = if let Some(res) = &self.source.resolution {
@@ -327,7 +300,8 @@ impl StreamRecorder {
 
         // Map each audio stream with its dedicated track title metadata
         for (i, track) in enabled_tracks.iter().enumerate() {
-            cmd.args(["-map", &format!("{}:a", i)]);
+            let input_idx = crate::platform::CurrentPlatform.audio_input_index(i);
+            cmd.args(["-map", &format!("{}:a", input_idx)]);
             cmd.args([
                 &format!("-metadata:s:a:{}", i),
                 &format!("title={}", track.name),
@@ -505,24 +479,20 @@ impl Drop for StreamRecorder {
 pub struct AudioTrackMonitor {
     child: Option<Child>,
     peak_level: Arc<AtomicU32>, // (0..10000)
+    device_identifier: String,
+    #[allow(dead_code)]
     device_index: usize,
 }
 
 impl AudioTrackMonitor {
-    pub fn new(device_index: usize) -> Self {
+    pub fn new(device_identifier: impl Into<String>) -> Self {
+        let identifier = device_identifier.into();
+        let device_index = identifier.parse::<usize>().unwrap_or(0);
         let peak_level = Arc::new(AtomicU32::new(0));
 
         let mut cmd = Command::new("ffmpeg");
-        cmd.args([
-            "-y",
-            "-f", "avfoundation",
-            "-i", &format!("none:{}", device_index),
-            "-vn",
-            "-ac", "1",
-            "-ar", "8000",
-            "-f", "f32le",
-            "pipe:1",
-        ]);
+        cmd.arg("-y");
+        cmd.args(crate::platform::CurrentPlatform.build_audio_monitor_args(&identifier));
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::null());
@@ -557,12 +527,18 @@ impl AudioTrackMonitor {
         Self {
             child,
             peak_level,
+            device_identifier: identifier,
             device_index,
         }
     }
 
+    #[allow(dead_code)]
     pub fn device_index(&self) -> usize {
         self.device_index
+    }
+
+    pub fn device_identifier(&self) -> &str {
+        &self.device_identifier
     }
 
     pub fn get_peak(&self) -> f32 {

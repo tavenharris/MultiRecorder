@@ -10,8 +10,7 @@ embed_timecode = true
 [[sources]]
 name = "gameplay"
 video_device = "1"
-resolution = "1920x1080"
-fps = 30
+fps = 60
 video_bitrate = "30M"
 encoder = "h264_videotoolbox"
 
@@ -23,9 +22,9 @@ encoder = "h264_videotoolbox"
 
 [[audio_tracks]]
 enabled = true
-name = "MacBook Pro Microphone"
+name = "Desktop Audio (WASAPI Loopback)"
 device_index = 0
-device_id = "in:0"
+device_id = "wasapi"
 
 [[audio_tracks]]
 enabled = false

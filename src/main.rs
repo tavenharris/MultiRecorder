@@ -1,6 +1,7 @@
 mod config;
 mod devices;
 mod engine;
+mod platform;
 mod recorder;
 mod remuxer;
 mod ring_buffer;
@@ -34,7 +35,7 @@ enum Commands {
         config: PathBuf,
     },
 
-    /// List all available AVFoundation video capture devices (capture cards, webcams) and audio inputs
+    /// List all available video capture devices (capture cards, webcams) and audio inputs
     Devices,
 
     /// Generate a template config.toml configuration file
@@ -66,6 +67,9 @@ enum Commands {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+
+    #[cfg(target_os = "windows")]
+    crate::platform::windows::ensure_ffmpeg_in_path();
 
     let cli = Cli::parse();
 
@@ -103,7 +107,7 @@ fn main() -> Result<()> {
 
         Commands::Devices => {
             println!("{}", "════════════════════════════════════════════════════════════════".cyan().bold());
-            println!("{}", "               DISCOVERED AVFOUNDATION DEVICES                  ".green().bold());
+            println!("{}", "                 DISCOVERED HARDWARE DEVICES                    ".green().bold());
             println!("{}", "════════════════════════════════════════════════════════════════".cyan().bold());
 
             let devices = DeviceManager::list_devices()?;
@@ -138,7 +142,10 @@ fn main() -> Result<()> {
                     println!("  • {}", dev.name.cyan().bold());
                 }
             }
+            #[cfg(target_os = "macos")]
             println!("\nTip: To route audio outputs (Speakers/AirPods) into a recording track, use BlackHole loopback or Multi-Output Device.");
+            #[cfg(not(target_os = "macos"))]
+            println!("\nTip: Audio outputs can be recorded directly using WASAPI loopback without extra drivers.");
         }
 
         Commands::Init { path } => {
