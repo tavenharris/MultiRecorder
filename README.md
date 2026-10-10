@@ -20,6 +20,7 @@ A high-performance macOS desktop application built in 100% Rust for content crea
   - [Running the GUI](#running-the-gui)
   - [Running Headless / CLI](#running-headless--cli)
   - [Discovering Devices](#discovering-devices)
+- [Stream Deck & Script Automation (Hotkeys & Arbitrary Durations)](#stream-deck--script-automation-hotkeys--arbitrary-durations)
 - [Audio Routing & Loopback (Speakers / AirPods)](#audio-routing--loopback-speakers--airpods)
 - [Configuration Guide (`config.toml`)](#configuration-guide-configtoml)
 - [NLE Multicam Workflow (Premiere Pro / DaVinci Resolve)](#nle-multicam-workflow-premiere-pro--davinci-resolve)
@@ -229,6 +230,150 @@ Output:
 🔄 [Loopback] BlackHole 2ch
 🔊 [Output] MacBook Pro Speakers (via Loopback)
 ```
+
+---
+
+## Stream Deck & Script Automation (Hotkeys & Arbitrary Durations)
+
+MultiRecording allows you to trigger flashback clip exports for **arbitrary durations** (e.g., last 1 minute, 5 minutes,
+20 minutes) using shell scripts, batch files, global keyboard shortcuts, or hardware controllers like an **Elgato Stream
+Deck**— **even while the GUI application is actively running and recording**.
+
+### How It Works: GUI & CLI Decoupling
+
+- When you click **`▶ Start Flashback`** in the GUI, MultiRecording continuously records 2-second segmented video and
+  audio chunks into the high-speed temporary buffer (`/tmp/multirecording_buffer` on macOS or
+  `%TEMP%\multirecording_buffer` on Windows).
+- The CLI command `multirecording save --duration <seconds>` operates as a **non-blocking, read-only disk inspector**.
+- It does not interfere with, restart, or lock the live recording session. Instead, it reads the requested duration of
+  buffered segments directly from disk and losslessly stitches (`-c copy`) them into your `output_dir` in **1 to 2
+  seconds**.
+- You can invoke this command at any time from scripts or hardware buttons without ever touching or minimizing the GUI.
+
+> [!NOTE]
+> The requested duration cannot exceed the total duration currently buffered or your configured `buffer_duration_secs`.
+For instance, if your buffer is set to 30 minutes, you can save 1m, 5m, or 20m clips at any point once that much time
+has elapsed.
+
+---
+
+### 1. The CLI Save Command
+
+```bash
+# Save the last 60 seconds (1 minute)
+multirecording save --duration 60
+
+# Save the last 300 seconds (5 minutes - default)
+multirecording save --duration 300
+
+# Save the last 1200 seconds (20 minutes)
+multirecording save --duration 1200
+
+# If config.toml is located elsewhere, pass --config explicitly:
+multirecording save --config /path/to/config.toml --duration 600
+```
+
+---
+
+### 2. Creating Quick Scripts
+
+Create wrapper scripts so you can trigger any duration with a single click or hotkey:
+
+#### macOS (`.sh` Scripts)
+
+Create a scripts directory (e.g. `~/scripts/multirecord/`):
+
+**`clip_1m.sh`**:
+
+```bash
+#!/usr/bin/env bash
+/path/to/MultiRecording/target/release/multirecording save --config /path/to/MultiRecording/config.toml --duration 60
+```
+
+**`clip_5m.sh`**:
+
+```bash
+#!/usr/bin/env bash
+/path/to/MultiRecording/target/release/multirecording save --config /path/to/MultiRecording/config.toml --duration 300
+```
+
+**`clip_20m.sh`**:
+
+```bash
+#!/usr/bin/env bash
+/path/to/MultiRecording/target/release/multirecording save --config /path/to/MultiRecording/config.toml --duration 1200
+```
+
+Make them executable in Terminal:
+
+```bash
+chmod +x ~/scripts/multirecord/*.sh
+```
+
+#### Windows (`.bat` Scripts)
+
+Create batch files in a convenient folder:
+
+**`clip_1m.bat`**:
+
+```bat
+@echo off
+"C:\path\to\MultiRecording\target\release\multirecording.exe" save --config "C:\path\to\MultiRecording\config.toml" --duration 60
+```
+
+**`clip_5m.bat`**:
+
+```bat
+@echo off
+"C:\path\to\MultiRecording\target\release\multirecording.exe" save --config "C:\path\to\MultiRecording\config.toml" --duration 300
+```
+
+**`clip_20m.bat`**:
+
+```bat
+@echo off
+"C:\path\to\MultiRecording\target\release\multirecording.exe" save --config "C:\path\to\MultiRecording\config.toml" --duration 1200
+```
+
+---
+
+### 3. Setting Up an Elgato Stream Deck
+
+You can map any number of duration buttons directly to your Elgato Stream Deck:
+
+1. Open the **Elgato Stream Deck** desktop app.
+2. In the right-side action library, find the **System** category.
+3. Drag the **Open** action onto an empty key.
+4. Configure the key:
+    - **Title**: `Clip 1m` (or `Clip 5m`, `Clip 20m`)
+    - **App / File**: Click the three dots (`...`) and select your script (`clip_1m.sh` on macOS or `clip_1m.bat` on
+      Windows).
+5. Repeat for any other durations you want (e.g., 30s, 2m, 5m, 10m, 20m).
+6. Pressing the button instantly exports that exact duration while your game and GUI recording continue uninterrupted!
+
+---
+
+### 4. Setting Up Global Keyboard Shortcuts (Without a Stream Deck)
+
+#### macOS:
+
+- **Shortcuts App**: Open the built-in macOS **Shortcuts** app $\rightarrow$ click `+` (New Shortcut) $\rightarrow$ add
+  a **Run Shell Script** action $\rightarrow$ paste
+  `/path/to/MultiRecording/target/release/multirecording save --config /path/to/MultiRecording/config.toml --duration 300` $\rightarrow$
+  In the Shortcut details panel on the right, enable **Use as Quick Action** and assign a **Run with shortcut** hotkey
+  (e.g. `Cmd + Option + 1`).
+- **Raycast / Alfred**: Create a Script Command or Workflow linked to a global hotkey.
+
+#### Windows:
+
+- **Shortcut Properties**: Right-click your `.bat` script $\rightarrow$ select **Create shortcut** $\rightarrow$
+  right-click the newly created `.lnk` file $\rightarrow$ select **Properties** $\rightarrow$ click the **Shortcut key**
+  field and press your desired combination (e.g. `Ctrl + Alt + 1`) $\rightarrow$ Click **OK**.
+- **AutoHotkey**: Add a hotkey trigger to your `.ahk` script:
+  ```ahk
+  ^!1::Run, "C:\path\to\MultiRecording\target\release\multirecording.exe" save --config "C:\path\to\MultiRecording\config.toml" --duration 60, , Hide
+  ^!5::Run, "C:\path\to\MultiRecording\target\release\multirecording.exe" save --config "C:\path\to\MultiRecording\config.toml" --duration 300, , Hide
+  ```
 
 ---
 
