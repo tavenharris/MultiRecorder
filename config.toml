@@ -1,22 +1,22 @@
 buffer_duration_secs = 1800
-segment_duration_secs = 2
+segment_duration_secs = 3
 output_dir = "recordings"
 buffer_dir = "/tmp/multirecording_buffer"
+output_format = "mp4"
+audio_bitrate = "256k"
 
 [[sources]]
 name = "gameplay"
-video_device = "3"
+video_device = "1"
 resolution = "1920x1080"
 fps = 60
-video_bitrate = "40M"
+video_bitrate = "30M"
 encoder = "h264_videotoolbox"
 
 [[sources]]
 name = "facecam"
 video_device = "0"
-resolution = "1920x1080"
-fps = 60
-video_bitrate = "15M"
+video_bitrate = "8M"
 encoder = "h264_videotoolbox"
 
 [[audio_tracks]]

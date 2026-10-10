@@ -43,23 +43,32 @@ impl Remuxer {
             output_file
         );
 
-        let status = Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                &list_file.to_string_lossy(),
-                "-c",
-                "copy",
-                "-movflags",
-                "+faststart",
-                &output_file.to_string_lossy(),
-            ])
-            .output()
-            .context("Failed to run ffmpeg concat remuxer")?;
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args([
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            &list_file.to_string_lossy(),
+            "-c",
+            "copy",
+        ]);
+
+        let is_mkv = output_file
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("mkv"))
+            .unwrap_or(false);
+
+        if !is_mkv {
+            cmd.args(["-movflags", "+faststart"]);
+        }
+
+        cmd.arg(output_file);
+
+        let status = cmd.output().context("Failed to run ffmpeg concat remuxer")?;
 
         let _ = fs::remove_file(&list_file);
 

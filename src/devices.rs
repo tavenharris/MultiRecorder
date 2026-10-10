@@ -16,6 +16,8 @@ pub struct Device {
     pub name: String,
     pub device_type: DeviceType,
     pub av_index: Option<usize>,
+    pub resolution: Option<String>,
+    pub fps: Option<u32>,
 }
 
 impl Device {
@@ -72,6 +74,14 @@ impl DeviceManager {
 
         let stderr = String::from_utf8_lossy(&output.stderr);
         let mut in_devices = Self::parse_avfoundation_devices(&stderr)?;
+        let display_res = Self::query_primary_display_resolution();
+        for dev in &mut in_devices {
+            if dev.device_type == DeviceType::Video && dev.name.to_lowercase().contains("screen") {
+                if let Some(r) = &display_res {
+                    dev.resolution = Some(r.clone());
+                }
+            }
+        }
         devices.append(&mut in_devices);
 
         let loopback_dev = Self::find_loopback_device(&devices).cloned();
@@ -83,6 +93,26 @@ impl DeviceManager {
         }
 
         Ok(devices)
+    }
+
+    pub fn query_primary_display_resolution() -> Option<String> {
+        let output = Command::new("system_profiler")
+            .args(["SPDisplaysDataType", "-json"])
+            .output()
+            .ok()?;
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        let displays = json.get("SPDisplaysDataType")?.as_array()?;
+        for d in displays {
+            if let Some(ndrvs) = d.get("spdisplays_ndrvs").and_then(|v| v.as_array()) {
+                for screen in ndrvs {
+                    if let Some(pixels) = screen.get("_spdisplays_pixels").and_then(|v| v.as_str()) {
+                        let clean = pixels.replace(" ", "");
+                        return Some(clean);
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub fn parse_avfoundation_devices(output: &str) -> Result<Vec<Device>> {
@@ -113,12 +143,29 @@ impl DeviceManager {
                                 DeviceType::AudioInput => (format!("in:{}", idx), Some(idx)),
                                 DeviceType::AudioOutput => (format!("out:{}", idx), None),
                             };
+                            let (res, fps) = match dev_type {
+                                DeviceType::Video => {
+                                    let lower = name.to_lowercase();
+                                    if lower.contains("screen") {
+                                        (Some("3024x1964".to_string()), Some(60))
+                                    } else if lower.contains("cam") || lower.contains("face") {
+                                        (Some("1920x1080".to_string()), Some(30))
+                                    } else if lower.contains("4k") {
+                                        (Some("3840x2160".to_string()), Some(60))
+                                    } else {
+                                        (Some("1920x1080".to_string()), Some(60))
+                                    }
+                                }
+                                _ => (None, None),
+                            };
                             devices.push(Device {
                                 id,
                                 index: idx,
                                 name,
                                 device_type: dev_type.clone(),
                                 av_index: av_idx,
+                                resolution: res,
+                                fps,
                             });
                         }
                     }
@@ -157,6 +204,8 @@ impl DeviceManager {
                                 name: name.to_string(),
                                 device_type: DeviceType::AudioOutput,
                                 av_index: loopback_index,
+                                resolution: None,
+                                fps: None,
                             });
                         }
                     }

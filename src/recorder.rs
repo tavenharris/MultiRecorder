@@ -11,25 +11,30 @@ use std::thread;
 
 pub struct PreviewStream {
     video_device: String,
+    is_screen: bool,
     child: Option<Child>,
     latest_frame: Arc<Mutex<Option<Vec<u8>>>>,
+    detected_format: Arc<Mutex<Option<String>>>,
 }
 
 impl PreviewStream {
-    pub fn new(video_device: String) -> Self {
+    pub fn new(video_device: String, is_screen: bool) -> Self {
         Self {
             video_device,
+            is_screen,
             child: None,
             latest_frame: Arc::new(Mutex::new(None)),
+            detected_format: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn start(&mut self) -> Result<()> {
         let mut cmd = Command::new("ffmpeg");
+        let framerate = if self.is_screen { "60" } else { "30" };
         cmd.args([
             "-y",
             "-f", "avfoundation",
-            "-framerate", "30",
+            "-framerate", framerate,
             "-i", &format!("{}:none", self.video_device),
             "-vf", "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,fps=15",
             "-f", "rawvideo",
@@ -38,7 +43,7 @@ impl PreviewStream {
         ]);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
+        cmd.stderr(Stdio::piped());
 
         let mut child = cmd.spawn().with_context(|| {
             format!("Failed to spawn preview ffmpeg for device {}", self.video_device)
@@ -58,12 +63,40 @@ impl PreviewStream {
             });
         }
 
+        if let Some(stderr) = child.stderr.take() {
+            let fmt_arc = Arc::clone(&self.detected_format);
+            thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                let res_re = regex::Regex::new(r"(\d{3,5}x\d{3,5})").ok();
+                let fps_re = regex::Regex::new(r"(\d+(?:\.\d+)?)\s*(?:fps|tbr)").ok();
+                for line in reader.lines().flatten() {
+                    if line.contains("Stream #0:0") && line.contains("Video:") {
+                        let res = res_re.as_ref().and_then(|r| r.captures(&line)).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+                        let fps = fps_re.as_ref().and_then(|r| r.captures(&line)).and_then(|c| c.get(1)).map(|m| {
+                            let n: f32 = m.as_str().parse().unwrap_or(30.0);
+                            format!("{}fps", n.round() as u32)
+                        }).unwrap_or_else(|| "30fps".to_string());
+                        if let Some(res) = res {
+                            if let Ok(mut lock) = fmt_arc.lock() {
+                                *lock = Some(format!("{}  {}", res, fps));
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         self.child = Some(child);
         Ok(())
     }
 
     pub fn get_latest_frame(&self) -> Option<Vec<u8>> {
         self.latest_frame.lock().ok().and_then(|f| f.clone())
+    }
+
+    pub fn get_detected_format(&self) -> Option<String> {
+        self.detected_format.lock().ok().and_then(|f| f.clone())
     }
 
     pub fn stop(&mut self) {
@@ -86,11 +119,13 @@ impl Drop for PreviewStream {
 pub struct StreamRecorder {
     source: SourceConfig,
     audio_tracks: Vec<AudioTrackConfig>,
+    audio_bitrate: String,
     child: Option<Child>,
     segment_duration_secs: u64,
     recent_logs: Arc<Mutex<VecDeque<String>>>,
     log_file_path: PathBuf,
     latest_frame: Arc<Mutex<Option<Vec<u8>>>>,
+    detected_format: Arc<Mutex<Option<String>>>,
 }
 
 impl StreamRecorder {
@@ -98,6 +133,7 @@ impl StreamRecorder {
         source: SourceConfig,
         audio_tracks: Vec<AudioTrackConfig>,
         segment_duration_secs: u64,
+        audio_bitrate: String,
     ) -> Self {
         let log_dir = PathBuf::from("/tmp/multirecording_logs");
         let _ = fs::create_dir_all(&log_dir);
@@ -106,11 +142,13 @@ impl StreamRecorder {
         Self {
             source,
             audio_tracks,
+            audio_bitrate,
             child: None,
             segment_duration_secs,
             recent_logs: Arc::new(Mutex::new(VecDeque::with_capacity(50))),
             log_file_path,
             latest_frame: Arc::new(Mutex::new(None)),
+            detected_format: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -244,7 +282,7 @@ impl StreamRecorder {
 
         // Audio encoder settings (applied to all mapped audio tracks)
         if !enabled_tracks.is_empty() {
-            cmd.args(["-c:a", "aac", "-b:a", "320k"]);
+            cmd.args(["-c:a", "aac", "-b:a", &self.audio_bitrate]);
         }
 
         // Segment muxer settings for rolling buffer
@@ -305,14 +343,30 @@ impl StreamRecorder {
         if let Some(stderr) = child.stderr.take() {
             let logs_arc = Arc::clone(&self.recent_logs);
             let log_path = self.log_file_path.clone();
+            let fmt_arc = Arc::clone(&self.detected_format);
 
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 let mut file_out = File::create(&log_path).ok();
+                let res_re = regex::Regex::new(r"(\d{3,5}x\d{3,5})").ok();
+                let fps_re = regex::Regex::new(r"(\d+(?:\.\d+)?)\s*(?:fps|tbr)").ok();
 
                 for line in reader.lines().flatten() {
                     if let Some(f) = file_out.as_mut() {
                         let _ = writeln!(f, "{}", line);
+                    }
+
+                    if line.contains("Stream #0:0") && line.contains("Video:") {
+                        let res = res_re.as_ref().and_then(|r| r.captures(&line)).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+                        let fps = fps_re.as_ref().and_then(|r| r.captures(&line)).and_then(|c| c.get(1)).map(|m| {
+                            let n: f32 = m.as_str().parse().unwrap_or(60.0);
+                            format!("{}fps", n.round() as u32)
+                        }).unwrap_or_else(|| "60fps".to_string());
+                        if let Some(res) = res {
+                            if let Ok(mut lock) = fmt_arc.lock() {
+                                *lock = Some(format!("{}  {}", res, fps));
+                            }
+                        }
                     }
 
                     if let Ok(mut logs) = logs_arc.lock() {
@@ -327,6 +381,10 @@ impl StreamRecorder {
 
         self.child = Some(child);
         Ok(())
+    }
+
+    pub fn get_detected_format(&self) -> Option<String> {
+        self.detected_format.lock().ok().and_then(|f| f.clone())
     }
 
     /// Check if child process is healthy. If it exited, returns error with recent logs.

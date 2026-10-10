@@ -87,6 +87,7 @@ impl RecordingEngine {
                 src,
                 tracks,
                 self.config.segment_duration_secs,
+                self.config.audio_bitrate.clone(),
             );
             recorder.start(&self.config.buffer_dir)?;
             self.recorders.push(recorder);

@@ -157,7 +157,8 @@ impl MultiRecordingApp {
         // Preview stream 1
         let dev1 = self.game_video_idx.to_string();
         if self.preview_stream_1.is_none() {
-            let mut ps1 = PreviewStream::new(dev1);
+            let is_screen = self.video_devices().iter().find(|d| d.index == self.game_video_idx).map(|d| d.name.to_lowercase().contains("screen")).unwrap_or(false);
+            let mut ps1 = PreviewStream::new(dev1, is_screen);
             let _ = ps1.start();
             self.preview_stream_1 = Some(ps1);
         }
@@ -165,7 +166,8 @@ impl MultiRecordingApp {
         // Preview stream 2 (only if distinct video device)
         let dev2 = self.cam_video_idx.to_string();
         if self.cam_video_idx != self.game_video_idx && self.preview_stream_2.is_none() {
-            let mut ps2 = PreviewStream::new(dev2);
+            let is_screen = self.video_devices().iter().find(|d| d.index == self.cam_video_idx).map(|d| d.name.to_lowercase().contains("screen")).unwrap_or(false);
+            let mut ps2 = PreviewStream::new(dev2, is_screen);
             let _ = ps2.start();
             self.preview_stream_2 = Some(ps2);
         }
@@ -235,6 +237,20 @@ impl MultiRecordingApp {
             };
         }
 
+        // Ensure at least 2 sources exist
+        while self.config.sources.len() < 2 {
+            let idx = self.config.sources.len();
+            let name = if idx == 0 { "gameplay" } else { "facecam" };
+            self.config.sources.push(SourceConfig {
+                name: name.to_string(),
+                video_device: "0".to_string(),
+                resolution: Some("1920x1080".to_string()),
+                fps: Some(60),
+                video_bitrate: if idx == 0 { "40M".to_string() } else { "15M".to_string() },
+                encoder: "h264_videotoolbox".to_string(),
+            });
+        }
+
         // Ensure exactly 5 audio tracks are configured
         while self.config.audio_tracks.len() < 5 {
             let idx = self.config.audio_tracks.len() + 1;
@@ -269,6 +285,74 @@ impl MultiRecordingApp {
             .iter()
             .filter(|d| d.device_type == DeviceType::AudioInput || d.device_type == DeviceType::AudioOutput)
             .collect()
+    }
+
+    pub fn get_input_format(&self, stream_idx: usize) -> String {
+        // 1. Try active recorder if recording
+        if self.is_recording {
+            if let Some(rec) = self.recorders.get(stream_idx) {
+                if let Some(fmt) = rec.get_detected_format() {
+                    return fmt;
+                }
+            }
+        } else {
+            // 2. Try active preview stream
+            let prev_fmt = if stream_idx == 0 {
+                self.preview_stream_1.as_ref().and_then(|p| p.get_detected_format())
+            } else {
+                self.preview_stream_2.as_ref().and_then(|p| p.get_detected_format())
+            };
+            if let Some(fmt) = prev_fmt {
+                return fmt;
+            }
+        }
+
+        // 3. Query metadata from discovered devices
+        let dev_idx = if stream_idx == 0 {
+            self.game_video_idx
+        } else {
+            self.cam_video_idx
+        };
+
+        if let Some(dev) = self.video_devices().into_iter().find(|d| d.index == dev_idx) {
+            if let (Some(res), Some(fps)) = (&dev.resolution, dev.fps) {
+                return format!("{}  {}fps", res, fps);
+            }
+            if let Some(res) = &dev.resolution {
+                return format!("{}  60fps", res);
+            }
+        }
+
+        "1920x1080  60fps".to_string()
+    }
+
+    pub fn get_output_format_label(&self, stream_idx: usize) -> String {
+        if let Some(src) = self.config.sources.get(stream_idx) {
+            match (&src.resolution, src.fps) {
+                (Some(res), Some(fps)) => format!("{}  {}fps", res, fps),
+                (Some(res), None) => format!("{}  60fps", res),
+                (None, Some(fps)) => format!("Native  {}fps", fps),
+                (None, None) => "Native Source".to_string(),
+            }
+        } else {
+            "1920x1080  60fps".to_string()
+        }
+    }
+
+    pub fn is_output_format(&self, stream_idx: usize, res: Option<&str>, fps: Option<u32>) -> bool {
+        if let Some(src) = self.config.sources.get(stream_idx) {
+            src.resolution.as_deref() == res && src.fps == fps
+        } else {
+            false
+        }
+    }
+
+    pub fn set_output_format(&mut self, stream_idx: usize, res: Option<&str>, fps: Option<u32>) {
+        if let Some(src) = self.config.sources.get_mut(stream_idx) {
+            src.resolution = res.map(|s| s.to_string());
+            src.fps = fps;
+            let _ = self.config.save_to_file(&self.config_path);
+        }
     }
 
     pub fn start_engine(&mut self) {
@@ -351,6 +435,7 @@ impl MultiRecordingApp {
                 src.clone(),
                 tracks,
                 self.config.segment_duration_secs,
+                self.config.audio_bitrate.clone(),
             );
             if let Err(e) = recorder.start(&self.config.buffer_dir) {
                 self.status_message = Some((
@@ -415,10 +500,16 @@ impl MultiRecordingApp {
                 return;
             }
 
+            let out_ext = if self.config.output_format.trim().is_empty() {
+                "mp4"
+            } else {
+                &self.config.output_format
+            };
             let out_file = self.config.output_dir.join(format!(
-                "Flashback_{}_{}.mp4",
+                "Flashback_{}_{}.{}",
                 timestamp,
-                mgr.source_name()
+                mgr.source_name(),
+                out_ext
             ));
 
             if let Err(e) = Remuxer::stitch_segments(&segments, &out_file) {
@@ -757,71 +848,210 @@ impl eframe::App for MultiRecordingApp {
                     .rounding(Rounding::same(6.0))
                     .inner_margin(Margin::same(12.0))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("⚙ Flashback Buffer Window:").strong().color(Color32::from_rgb(244, 244, 245)));
-                            for &(secs, label) in &[
-                                (60, "1m"),
-                                (300, "5m"),
-                                (900, "15m"),
-                                (1800, "30m"),
-                                (3600, "1h"),
-                                (7200, "2h"),
-                            ] {
-                                let is_selected = self.selected_flashback_secs == secs;
-                                let btn_color = if is_selected {
-                                    Color32::from_rgb(99, 102, 241)
-                                } else {
-                                    Color32::from_rgb(45, 45, 52)
-                                };
-                                if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(btn_color)).clicked() {
-                                    self.selected_flashback_secs = secs;
-                                    self.config.buffer_duration_secs = secs;
+                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                            // --- Row 1: Output Format & Output Folder ---
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("📁 Output Format:").strong().color(Color32::from_rgb(244, 244, 245)));
+                                for &(fmt, label) in &[("mp4", "MP4 (.mp4)"), ("mov", "MOV (.mov)"), ("mkv", "MKV (.mkv)")] {
+                                    let is_cur = self.config.output_format.eq_ignore_ascii_case(fmt);
+                                    let btn_color = if is_cur { Color32::from_rgb(99, 102, 241) } else { Color32::from_rgb(45, 45, 52) };
+                                    if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE).size(11.0)).fill(btn_color)).clicked() {
+                                        self.config.output_format = fmt.to_string();
+                                        let _ = self.config.save_to_file(&self.config_path);
+                                    }
+                                }
+
+                                ui.add_space(16.0);
+                                ui.label(RichText::new("Folder:").strong().color(Color32::from_rgb(244, 244, 245)));
+                                let mut dir_str = self.config.output_dir.to_string_lossy().to_string();
+                                if ui.add(egui::TextEdit::singleline(&mut dir_str).desired_width(180.0)).changed() {
+                                    self.config.output_dir = PathBuf::from(dir_str);
                                     let _ = self.config.save_to_file(&self.config_path);
                                 }
-                            }
 
-                            ui.add_space(8.0);
-                            let mut mins = (self.selected_flashback_secs / 60).clamp(1, 120);
-                            if ui.add(egui::Slider::new(&mut mins, 1..=120).suffix(" min")).changed() {
-                                self.selected_flashback_secs = mins * 60;
-                                self.config.buffer_duration_secs = mins * 60;
-                                let _ = self.config.save_to_file(&self.config_path);
-                            }
+                                if ui.add(egui::Button::new(RichText::new("📂 Browse...").size(11.0))).clicked() {
+                                    if let Ok(out) = Command::new("osascript")
+                                        .args(["-e", "POSIX path of (choose folder with prompt \"Select Recordings Destination\")"])
+                                        .output()
+                                    {
+                                        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                                        if !p.is_empty() {
+                                            self.config.output_dir = PathBuf::from(p);
+                                            let _ = self.config.save_to_file(&self.config_path);
+                                        }
+                                    }
+                                }
 
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(egui::Button::new("📂 Open Recordings Folder")).clicked() {
+                                if ui.add(egui::Button::new(RichText::new("Reveal").size(11.0))).clicked() {
+                                    let _ = fs::create_dir_all(&self.config.output_dir);
                                     let _ = Command::new("open").arg(&self.config.output_dir).spawn();
                                 }
-                                if ui.add(egui::Button::new("🔄 Refresh Hardware Devices")).clicked() {
-                                    self.refresh_devices();
+                            });
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+
+                            // --- Row 2: Video Encoder & Bitrates ---
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("🎬 Video Encoder:").strong().color(Color32::from_rgb(244, 244, 245)));
+                                let current_enc = self.config.sources.first().map(|s| s.encoder.clone()).unwrap_or_else(|| "h264_videotoolbox".to_string());
+                                for &(enc, label) in &[
+                                    ("h264_videotoolbox", "Apple H.264 (Hardware)"),
+                                    ("hevc_videotoolbox", "Apple HEVC / H.265"),
+                                    ("libx264", "libx264 (CPU)"),
+                                ] {
+                                    let is_cur = current_enc == enc;
+                                    let btn_color = if is_cur { Color32::from_rgb(99, 102, 241) } else { Color32::from_rgb(45, 45, 52) };
+                                    if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE).size(11.0)).fill(btn_color)).clicked() {
+                                        for src in &mut self.config.sources {
+                                            src.encoder = enc.to_string();
+                                        }
+                                        let _ = self.config.save_to_file(&self.config_path);
+                                    }
+                                }
+
+                                ui.add_space(16.0);
+                                ui.label(RichText::new("Segment:").strong().color(Color32::from_rgb(244, 244, 245)));
+                                for &(dur, label) in &[(2, "2s (Fast)"), (3, "3s"), (5, "5s")] {
+                                    let is_cur = self.config.segment_duration_secs == dur;
+                                    let btn_color = if is_cur { Color32::from_rgb(99, 102, 241) } else { Color32::from_rgb(45, 45, 52) };
+                                    if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE).size(11.0)).fill(btn_color)).clicked() {
+                                        self.config.segment_duration_secs = dur;
+                                        let _ = self.config.save_to_file(&self.config_path);
+                                    }
                                 }
                             });
-                        });
 
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            if self.has_loopback {
-                                ui.label(RichText::new("● BlackHole Loopback Driver: Installed & Active").color(Color32::from_rgb(16, 185, 129)).size(11.0));
-                            } else {
-                                ui.label(RichText::new("○ BlackHole Loopback: Not installed. Required for Speaker/AirPods recording.").color(Color32::from_rgb(245, 158, 11)).size(11.0));
-                                let is_copied = self.copied_brew_cmd_until.map(|t| t.elapsed() < Duration::from_secs(3)).unwrap_or(false);
-                                let brew_text = if is_copied { "✔ Copied!" } else { "📋 Copy Brew Install" };
-                                if ui.add(egui::Button::new(RichText::new(brew_text).size(10.0))).clicked() {
-                                    ui.output_mut(|o| o.copied_text = "brew install --cask blackhole-2ch".to_string());
-                                    self.copied_brew_cmd_until = Some(Instant::now());
-                                }
-                                if ui.add(egui::Button::new(RichText::new("🎛 Audio MIDI Setup").size(10.0))).clicked() {
-                                    let _ = Command::new("open").arg("-a").arg("Audio MIDI Setup").spawn();
-                                }
-                            }
-                        });
-
-                        if !self.recent_exports.is_empty() {
                             ui.add_space(6.0);
+
+                            // --- Row 3: Bitrates (Stream 1, Stream 2, Audio) ---
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("⚡ Bitrates:").strong().color(Color32::from_rgb(244, 244, 245)));
+
+                                ui.label(RichText::new("Stream 1:").size(11.0).color(Color32::from_rgb(161, 161, 170)));
+                                let cur_b1 = self.config.sources.first().map(|s| s.video_bitrate.clone()).unwrap_or_else(|| "40M".to_string());
+                                for &b in &["20M", "30M", "40M", "60M", "80M"] {
+                                    let is_cur = cur_b1 == b;
+                                    let btn_color = if is_cur { Color32::from_rgb(16, 185, 129) } else { Color32::from_rgb(45, 45, 52) };
+                                    if ui.add(egui::Button::new(RichText::new(b).color(Color32::WHITE).size(10.0)).fill(btn_color)).clicked() {
+                                        if let Some(src) = self.config.sources.first_mut() {
+                                            src.video_bitrate = b.to_string();
+                                            let _ = self.config.save_to_file(&self.config_path);
+                                        }
+                                    }
+                                }
+
+                                ui.add_space(8.0);
+                                ui.label(RichText::new("Stream 2:").size(11.0).color(Color32::from_rgb(161, 161, 170)));
+                                let cur_b2 = self.config.sources.get(1).map(|s| s.video_bitrate.clone()).unwrap_or_else(|| "15M".to_string());
+                                for &b in &["8M", "12M", "15M", "20M"] {
+                                    let is_cur = cur_b2 == b;
+                                    let btn_color = if is_cur { Color32::from_rgb(16, 185, 129) } else { Color32::from_rgb(45, 45, 52) };
+                                    if ui.add(egui::Button::new(RichText::new(b).color(Color32::WHITE).size(10.0)).fill(btn_color)).clicked() {
+                                        if self.config.sources.len() > 1 {
+                                            self.config.sources[1].video_bitrate = b.to_string();
+                                            let _ = self.config.save_to_file(&self.config_path);
+                                        }
+                                    }
+                                }
+
+                                ui.add_space(8.0);
+                                ui.label(RichText::new("Audio:").size(11.0).color(Color32::from_rgb(161, 161, 170)));
+                                for &ab in &["192k", "256k", "320k"] {
+                                    let is_cur = self.config.audio_bitrate == ab;
+                                    let btn_color = if is_cur { Color32::from_rgb(16, 185, 129) } else { Color32::from_rgb(45, 45, 52) };
+                                    if ui.add(egui::Button::new(RichText::new(ab).color(Color32::WHITE).size(10.0)).fill(btn_color)).clicked() {
+                                        self.config.audio_bitrate = ab.to_string();
+                                        let _ = self.config.save_to_file(&self.config_path);
+                                    }
+                                }
+                            });
+
+                            ui.add_space(8.0);
                             ui.separator();
-                            ui.add_space(4.0);
-                            ui.label(RichText::new("Recent Saved Flashbacks:").size(11.0).color(Color32::from_rgb(161, 161, 170)));
-                            egui::ScrollArea::vertical().max_height(75.0).show(ui, |ui| {
+                            ui.add_space(8.0);
+
+                            // --- Row 4: Flashback Buffer Window ---
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("⏱ Flashback Buffer Window:").strong().color(Color32::from_rgb(244, 244, 245)));
+                                for &(secs, label) in &[
+                                    (60, "1m"),
+                                    (300, "5m"),
+                                    (900, "15m"),
+                                    (1800, "30m"),
+                                    (3600, "1h"),
+                                    (7200, "2h"),
+                                ] {
+                                    let is_selected = self.selected_flashback_secs == secs;
+                                    let btn_color = if is_selected {
+                                        Color32::from_rgb(99, 102, 241)
+                                    } else {
+                                        Color32::from_rgb(45, 45, 52)
+                                    };
+                                    if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(btn_color)).clicked() {
+                                        self.selected_flashback_secs = secs;
+                                        self.config.buffer_duration_secs = secs;
+                                        let _ = self.config.save_to_file(&self.config_path);
+                                    }
+                                }
+
+                                ui.add_space(8.0);
+                                let mut mins = (self.selected_flashback_secs / 60).clamp(1, 120);
+                                if ui.add(egui::Slider::new(&mut mins, 1..=120).suffix(" min")).changed() {
+                                    self.selected_flashback_secs = mins * 60;
+                                    self.config.buffer_duration_secs = mins * 60;
+                                    let _ = self.config.save_to_file(&self.config_path);
+                                }
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add(egui::Button::new("🧹 Clean Buffer Cache").fill(Color32::from_rgb(45, 45, 52))).clicked() {
+                                        if let Ok(entries) = fs::read_dir(&self.config.buffer_dir) {
+                                            for entry in entries.flatten() {
+                                                let p = entry.path();
+                                                if p.extension().map(|e| e == "mp4").unwrap_or(false) {
+                                                    let _ = fs::remove_file(p);
+                                                }
+                                            }
+                                            self.status_message = Some(("Buffer cache cleaned.".to_string(), Instant::now(), false));
+                                        }
+                                    }
+                                });
+                            });
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+
+                            // --- Row 5: Hardware & System Audio Driver ---
+                            ui.horizontal(|ui| {
+                                if self.has_loopback {
+                                    ui.label(RichText::new("● BlackHole Loopback Driver: Installed & Active").color(Color32::from_rgb(16, 185, 129)).size(11.0));
+                                } else {
+                                    ui.label(RichText::new("○ BlackHole Loopback: Not installed. Required for Speaker/AirPods recording.").color(Color32::from_rgb(245, 158, 11)).size(11.0));
+                                    let is_copied = self.copied_brew_cmd_until.map(|t| t.elapsed() < Duration::from_secs(3)).unwrap_or(false);
+                                    let brew_text = if is_copied { "✔ Copied!" } else { "📋 Copy Brew Install" };
+                                    if ui.add(egui::Button::new(RichText::new(brew_text).size(10.0))).clicked() {
+                                        ui.output_mut(|o| o.copied_text = "brew install --cask blackhole-2ch".to_string());
+                                        self.copied_brew_cmd_until = Some(Instant::now());
+                                    }
+                                    if ui.add(egui::Button::new(RichText::new("🎛 Audio MIDI Setup").size(10.0))).clicked() {
+                                        let _ = Command::new("open").arg("-a").arg("Audio MIDI Setup").spawn();
+                                    }
+                                }
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add(egui::Button::new("🔄 Refresh Hardware Devices")).clicked() {
+                                        self.refresh_devices();
+                                    }
+                                });
+                            });
+
+                            if !self.recent_exports.is_empty() {
+                                ui.add_space(6.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                                ui.label(RichText::new("Recent Saved Flashbacks:").size(11.0).color(Color32::from_rgb(161, 161, 170)));
                                 for exp in &self.recent_exports {
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new(format!("⚡ {}", exp.timestamp)).size(11.0).strong().color(Color32::from_rgb(244, 244, 245)));
@@ -833,19 +1063,19 @@ impl eframe::App for MultiRecordingApp {
                                         });
                                     });
                                 }
-                            });
-                        }
+                            }
 
-                        if !self.recorders.is_empty() {
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                for rec in &self.recorders {
-                                    if ui.add(egui::Button::new(RichText::new(format!("Open [{}] Log", rec.source_name())).size(10.0))).clicked() {
-                                        let _ = Command::new("open").arg("-a").arg("TextEdit").arg(rec.log_file_path()).spawn();
+                            if !self.recorders.is_empty() {
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    for rec in &self.recorders {
+                                        if ui.add(egui::Button::new(RichText::new(format!("Open [{}] Log", rec.source_name())).size(10.0))).clicked() {
+                                            let _ = Command::new("open").arg("-a").arg("TextEdit").arg(rec.log_file_path()).spawn();
+                                        }
                                     }
-                                }
-                            });
-                        }
+                                });
+                            }
+                        });
                     });
             }
 
@@ -937,13 +1167,14 @@ impl eframe::App for MultiRecordingApp {
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
                                     ui.label(RichText::new("input").size(10.0).color(Color32::from_rgb(156, 163, 175)));
+                                    let in_label = self.get_input_format(0);
                                     egui::Frame::none()
                                         .fill(Color32::from_rgb(26, 26, 31))
                                         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 45, 52)))
                                         .rounding(Rounding::same(3.0))
                                         .inner_margin(Margin::symmetric(10.0, 4.0))
                                         .show(ui, |ui| {
-                                            ui.label(RichText::new("1920x1080  60fps").size(11.0).monospace().color(Color32::from_rgb(228, 228, 231)));
+                                            ui.label(RichText::new(in_label).size(11.0).monospace().color(Color32::from_rgb(228, 228, 231)));
                                         });
                                 });
 
@@ -951,13 +1182,25 @@ impl eframe::App for MultiRecordingApp {
 
                                 ui.vertical(|ui| {
                                     ui.label(RichText::new("output").size(10.0).color(Color32::from_rgb(156, 163, 175)));
-                                    egui::Frame::none()
-                                        .fill(Color32::from_rgb(26, 26, 31))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 45, 52)))
-                                        .rounding(Rounding::same(3.0))
-                                        .inner_margin(Margin::symmetric(10.0, 4.0))
-                                        .show(ui, |ui| {
-                                            ui.label(RichText::new("1920x1080  60fps").size(11.0).monospace().color(Color32::from_rgb(228, 228, 231)));
+                                    let cur_label = self.get_output_format_label(0);
+                                    egui::ComboBox::from_id_source("stream_0_output_combo")
+                                        .width(145.0)
+                                        .selected_text(RichText::new(cur_label).size(11.0).monospace().color(Color32::from_rgb(228, 228, 231)))
+                                        .show_ui(ui, |ui| {
+                                            for &(label, res, fps) in &[
+                                                ("1080p 60fps (1920x1080)", Some("1920x1080"), Some(60)),
+                                                ("1440p 60fps (2560x1440)", Some("2560x1440"), Some(60)),
+                                                ("4K 60fps (3840x2160)",    Some("3840x2160"), Some(60)),
+                                                ("720p 60fps (1280x720)",   Some("1280x720"),  Some(60)),
+                                                ("1080p 30fps (1920x1080)", Some("1920x1080"), Some(30)),
+                                                ("720p 30fps (1280x720)",   Some("1280x720"),  Some(30)),
+                                                ("Native Input Resolution", None,              None),
+                                            ] {
+                                                let is_cur = self.is_output_format(0, res, fps);
+                                                if ui.selectable_label(is_cur, label).clicked() {
+                                                    self.set_output_format(0, res, fps);
+                                                }
+                                            }
                                         });
                                 });
                             });
@@ -1037,13 +1280,14 @@ impl eframe::App for MultiRecordingApp {
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
                                     ui.label(RichText::new("input").size(10.0).color(Color32::from_rgb(156, 163, 175)));
+                                    let in_label = self.get_input_format(1);
                                     egui::Frame::none()
                                         .fill(Color32::from_rgb(26, 26, 31))
                                         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 45, 52)))
                                         .rounding(Rounding::same(3.0))
                                         .inner_margin(Margin::symmetric(10.0, 4.0))
                                         .show(ui, |ui| {
-                                            ui.label(RichText::new("1920x1080  60fps").size(11.0).monospace().color(Color32::from_rgb(228, 228, 231)));
+                                            ui.label(RichText::new(in_label).size(11.0).monospace().color(Color32::from_rgb(228, 228, 231)));
                                         });
                                 });
 
@@ -1051,13 +1295,25 @@ impl eframe::App for MultiRecordingApp {
 
                                 ui.vertical(|ui| {
                                     ui.label(RichText::new("output").size(10.0).color(Color32::from_rgb(156, 163, 175)));
-                                    egui::Frame::none()
-                                        .fill(Color32::from_rgb(26, 26, 31))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 45, 52)))
-                                        .rounding(Rounding::same(3.0))
-                                        .inner_margin(Margin::symmetric(10.0, 4.0))
-                                        .show(ui, |ui| {
-                                            ui.label(RichText::new("1920x1080  60fps").size(11.0).monospace().color(Color32::from_rgb(228, 228, 231)));
+                                    let cur_label = self.get_output_format_label(1);
+                                    egui::ComboBox::from_id_source("stream_1_output_combo")
+                                        .width(145.0)
+                                        .selected_text(RichText::new(cur_label).size(11.0).monospace().color(Color32::from_rgb(228, 228, 231)))
+                                        .show_ui(ui, |ui| {
+                                            for &(label, res, fps) in &[
+                                                ("1080p 60fps (1920x1080)", Some("1920x1080"), Some(60)),
+                                                ("1440p 60fps (2560x1440)", Some("2560x1440"), Some(60)),
+                                                ("4K 60fps (3840x2160)",    Some("3840x2160"), Some(60)),
+                                                ("720p 60fps (1280x720)",   Some("1280x720"),  Some(60)),
+                                                ("1080p 30fps (1920x1080)", Some("1920x1080"), Some(30)),
+                                                ("720p 30fps (1280x720)",   Some("1280x720"),  Some(30)),
+                                                ("Native Input Resolution", None,              None),
+                                            ] {
+                                                let is_cur = self.is_output_format(1, res, fps);
+                                                if ui.selectable_label(is_cur, label).clicked() {
+                                                    self.set_output_format(1, res, fps);
+                                                }
+                                            }
                                         });
                                 });
                             });
