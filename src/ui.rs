@@ -2,7 +2,7 @@
 
 use crate::config::{AudioTrackConfig, Config, SourceConfig};
 use crate::devices::{Device, DeviceManager, DeviceType};
-use crate::recorder::{PreviewStream, StreamRecorder};
+use crate::recorder::{AudioTrackMonitor, PreviewStream, StreamRecorder};
 use crate::remuxer::Remuxer;
 use crate::ring_buffer::RingBufferManager;
 use eframe::egui::{self, Color32, FontFamily, FontId, Margin, RichText, Rounding, Stroke, Vec2};
@@ -36,6 +36,9 @@ pub struct MultiRecordingApp {
     preview_stream_2: Option<PreviewStream>,
     preview_texture_1: Option<egui::TextureHandle>,
     preview_texture_2: Option<egui::TextureHandle>,
+
+    // Real Hardware Audio Monitors
+    audio_monitors: [Option<AudioTrackMonitor>; 5],
 
     // Stats, UI & Feedback
     status_message: Option<(String, Instant, bool)>, // (msg, time, is_error)
@@ -86,6 +89,7 @@ impl MultiRecordingApp {
             show_settings: false,
             recording_started_at: None,
             audio_levels: [0.0; 5],
+            audio_monitors: [None, None, None, None, None],
             game_video_idx: 0,
             cam_video_idx: 0,
             copied_brew_cmd_until: None,
@@ -93,6 +97,7 @@ impl MultiRecordingApp {
 
         app.sync_device_selections();
         app.ensure_preview_streams();
+        app.sync_audio_monitors();
         app
     }
 
@@ -100,6 +105,7 @@ impl MultiRecordingApp {
         self.discovered_devices = DeviceManager::list_devices().unwrap_or_default();
         self.has_loopback = DeviceManager::has_loopback_device(&self.discovered_devices);
         self.sync_device_selections();
+        self.sync_audio_monitors();
         self.stop_preview_streams();
         self.ensure_preview_streams();
         self.status_message = Some((
@@ -111,6 +117,35 @@ impl MultiRecordingApp {
             Instant::now(),
             false,
         ));
+    }
+
+    pub fn sync_audio_monitors(&mut self) {
+        for i in 0..5 {
+            let track = self.config.audio_tracks.get(i);
+            if let Some(track) = track {
+                if track.enabled {
+                    if let Some(dev) = self.discovered_devices.iter().find(|d| d.id == track.device_id) {
+                        if let Some(av_idx) = dev.av_index {
+                            let need_spawn = match &self.audio_monitors[i] {
+                                Some(m) => m.device_index() != av_idx,
+                                None => true,
+                            };
+                            if need_spawn {
+                                if let Some(mut old) = self.audio_monitors[i].take() {
+                                    old.stop();
+                                }
+                                self.audio_monitors[i] = Some(AudioTrackMonitor::new(av_idx));
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            if let Some(mut old) = self.audio_monitors[i].take() {
+                old.stop();
+            }
+            self.audio_levels[i] = 0.0;
+        }
     }
 
     pub fn ensure_preview_streams(&mut self) {
@@ -574,23 +609,20 @@ impl eframe::App for MultiRecordingApp {
             }
         }
 
-        // 2. Animate Audio VU Levels
-        let now_secs = Instant::now().elapsed().as_secs_f32();
-        for (i, track) in self.config.audio_tracks.iter().enumerate() {
-            if track.enabled && (self.is_recording || self.preview_stream_1.is_some()) {
-                // Natural bounce matching user sketch (track 1 ~60%, track 2 ~45%, track 3 ~70%)
-                let base = match i {
-                    0 => 0.58,
-                    1 => 0.44,
-                    2 => 0.68,
-                    _ => 0.40,
-                };
-                let wave = 0.14 * (now_secs * (3.5 + i as f32 * 1.7)).sin()
-                    + 0.08 * (now_secs * (7.2 - i as f32 * 1.1)).cos();
-                let target = (base + wave).clamp(0.05, 0.98);
-                self.audio_levels[i] = self.audio_levels[i] * 0.75 + target * 0.25;
+        // 2. Sample Audio VU Levels from Real Hardware Monitors
+        for i in 0..5 {
+            let track_enabled = self.config.audio_tracks.get(i).map(|t| t.enabled).unwrap_or(false);
+            if track_enabled {
+                let peak = self.audio_monitors[i].as_ref().map(|m| m.get_peak()).unwrap_or(0.0);
+                if peak > self.audio_levels[i] {
+                    // Fast attack for punchy responsiveness
+                    self.audio_levels[i] = self.audio_levels[i] * 0.2 + peak * 0.8;
+                } else {
+                    // Smooth broadcast decay
+                    self.audio_levels[i] = self.audio_levels[i] * 0.88;
+                }
             } else {
-                self.audio_levels[i] = self.audio_levels[i] * 0.7; // decay to 0
+                self.audio_levels[i] = 0.0;
             }
         }
 
@@ -660,12 +692,19 @@ impl eframe::App for MultiRecordingApp {
 
                             ui.add_space(16.0);
 
-                            // Live Timer (3:58s in sketch)
+                            // Live Timer (3:58s in sketch, formatted as H:MM:SS for up to 2 hours)
+                            let format_dur = |secs: u64| {
+                                if secs >= 3600 {
+                                    format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+                                } else {
+                                    format!("{}:{:02}s", secs / 60, secs % 60)
+                                }
+                            };
                             let timer_text = if self.is_recording {
                                 let elapsed = self.recording_started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-                                format!("{}:{:02}s", elapsed / 60, elapsed % 60)
+                                format_dur(elapsed)
                             } else {
-                                format!("{}:00s", self.selected_flashback_secs / 60)
+                                format_dur(self.selected_flashback_secs)
                             };
                             ui.label(RichText::new(timer_text).font(FontId::new(16.0, FontFamily::Monospace)).strong().color(Color32::from_rgb(244, 244, 245)));
 
@@ -720,15 +759,14 @@ impl eframe::App for MultiRecordingApp {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("⚙ Flashback Buffer Window:").strong().color(Color32::from_rgb(244, 244, 245)));
-                            for &secs in &[60, 180, 300, 600, 900] {
-                                let label = match secs {
-                                    60 => "1m",
-                                    180 => "3m",
-                                    300 => "5m",
-                                    600 => "10m",
-                                    900 => "15m",
-                                    _ => "custom",
-                                };
+                            for &(secs, label) in &[
+                                (60, "1m"),
+                                (300, "5m"),
+                                (900, "15m"),
+                                (1800, "30m"),
+                                (3600, "1h"),
+                                (7200, "2h"),
+                            ] {
                                 let is_selected = self.selected_flashback_secs == secs;
                                 let btn_color = if is_selected {
                                     Color32::from_rgb(99, 102, 241)
@@ -740,6 +778,14 @@ impl eframe::App for MultiRecordingApp {
                                     self.config.buffer_duration_secs = secs;
                                     let _ = self.config.save_to_file(&self.config_path);
                                 }
+                            }
+
+                            ui.add_space(8.0);
+                            let mut mins = (self.selected_flashback_secs / 60).clamp(1, 120);
+                            if ui.add(egui::Slider::new(&mut mins, 1..=120).suffix(" min")).changed() {
+                                self.selected_flashback_secs = mins * 60;
+                                self.config.buffer_duration_secs = mins * 60;
+                                let _ = self.config.save_to_file(&self.config_path);
                             }
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -852,24 +898,33 @@ impl eframe::App for MultiRecordingApp {
 
                             ui.add_space(6.0);
 
-                            // Live Viewport Canvas
+                            // Live Viewport Canvas (Locked 16:9 Aspect Ratio)
                             let vp_width = ui.available_width();
-                            let vp_height = (vp_width * 9.0 / 16.0).clamp(160.0, 210.0);
+                            let vp_height = (vp_width * 9.0 / 16.0).round();
                             let (rect, _) = ui.allocate_exact_size(Vec2::new(vp_width, vp_height), egui::Sense::hover());
+
+                            ui.painter().rect_filled(rect, Rounding::same(4.0), Color32::from_rgb(12, 12, 16));
+
+                            let target_aspect = 16.0 / 9.0;
+                            let (draw_w, draw_h) = if rect.width() / rect.height() > target_aspect {
+                                (rect.height() * target_aspect, rect.height())
+                            } else {
+                                (rect.width(), rect.width() / target_aspect)
+                            };
+                            let draw_rect = egui::Rect::from_center_size(rect.center(), Vec2::new(draw_w, draw_h));
 
                             if let Some(tex) = &self.preview_texture_1 {
                                 ui.painter().image(
                                     tex.id(),
-                                    rect,
+                                    draw_rect,
                                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                                     Color32::WHITE,
                                 );
                             } else {
-                                ui.painter().rect_filled(rect, Rounding::same(4.0), Color32::from_rgb(14, 14, 17));
                                 ui.painter().text(
                                     rect.center(),
                                     egui::Align2::CENTER_CENTER,
-                                    "📷 Video preview 1\n(Ready / Buffering)",
+                                    "📷 Video preview 1\n(Ready / Standby)",
                                     FontId::new(13.0, FontFamily::Proportional),
                                     Color32::from_rgb(113, 113, 122),
                                 );
@@ -943,20 +998,29 @@ impl eframe::App for MultiRecordingApp {
 
                             ui.add_space(6.0);
 
-                            // Live Viewport Canvas
+                            // Live Viewport Canvas (Locked 16:9 Aspect Ratio)
                             let vp_width = ui.available_width();
-                            let vp_height = (vp_width * 9.0 / 16.0).clamp(160.0, 210.0);
+                            let vp_height = (vp_width * 9.0 / 16.0).round();
                             let (rect, _) = ui.allocate_exact_size(Vec2::new(vp_width, vp_height), egui::Sense::hover());
+
+                            ui.painter().rect_filled(rect, Rounding::same(4.0), Color32::from_rgb(12, 12, 16));
+
+                            let target_aspect = 16.0 / 9.0;
+                            let (draw_w, draw_h) = if rect.width() / rect.height() > target_aspect {
+                                (rect.height() * target_aspect, rect.height())
+                            } else {
+                                (rect.width(), rect.width() / target_aspect)
+                            };
+                            let draw_rect = egui::Rect::from_center_size(rect.center(), Vec2::new(draw_w, draw_h));
 
                             if let Some(tex) = &self.preview_texture_2 {
                                 ui.painter().image(
                                     tex.id(),
-                                    rect,
+                                    draw_rect,
                                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                                     Color32::WHITE,
                                 );
                             } else {
-                                ui.painter().rect_filled(rect, Rounding::same(4.0), Color32::from_rgb(14, 14, 17));
                                 ui.painter().text(
                                     rect.center(),
                                     egui::Align2::CENTER_CENTER,
@@ -1018,6 +1082,8 @@ impl eframe::App for MultiRecordingApp {
             let audio_device_items: Vec<Device> = self.audio_devices().into_iter().cloned().collect();
             let has_loopback = self.has_loopback;
 
+            let mut audio_changed = false;
+
             egui::Frame::none()
                 .fill(Color32::from_rgb(22, 22, 26))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 38, 44)))
@@ -1052,6 +1118,7 @@ impl eframe::App for MultiRecordingApp {
                                     if ui.selectable_label(!track.enabled, "None").clicked() {
                                         track.enabled = false;
                                         track.device_id = "none".to_string();
+                                        audio_changed = true;
                                     }
 
                                     ui.separator();
@@ -1063,6 +1130,7 @@ impl eframe::App for MultiRecordingApp {
                                             track.device_id = dev.id.clone();
                                             track.device_index = dev.av_index.unwrap_or(0);
                                             track.name = dev.name.clone();
+                                            audio_changed = true;
                                         }
                                     }
 
@@ -1075,6 +1143,7 @@ impl eframe::App for MultiRecordingApp {
                                             track.device_id = dev.id.clone();
                                             track.device_index = dev.av_index.unwrap_or(0);
                                             track.name = dev.name.clone();
+                                            audio_changed = true;
                                         }
                                     }
                                 });
@@ -1093,6 +1162,11 @@ impl eframe::App for MultiRecordingApp {
                         }
                     }
                 });
+
+            if audio_changed {
+                self.sync_audio_monitors();
+                let _ = self.config.save_to_file(&self.config_path);
+            }
         });
     }
 }

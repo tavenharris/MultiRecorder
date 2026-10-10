@@ -5,6 +5,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -30,7 +31,7 @@ impl PreviewStream {
             "-f", "avfoundation",
             "-framerate", "30",
             "-i", &format!("{}:none", self.video_device),
-            "-vf", "scale=320:180,fps=15",
+            "-vf", "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,fps=15",
             "-f", "rawvideo",
             "-pix_fmt", "rgba",
             "pipe:1",
@@ -187,15 +188,30 @@ impl StreamRecorder {
             ]);
         }
 
-        // Filter complex: split video into [rec] and [prev]
+        // Filter complex: split video into [rec] and [prev] with locked 16:9 aspect ratio and padding
         let filter_str = if let Some(res) = &self.source.resolution {
             if let Some((w, h)) = res.split_once('x') {
-                format!("[0:v]split=2[rec_raw][prev_raw];[rec_raw]scale={}:{},fps={}[rec];[prev_raw]scale=320:180,fps=15[prev]", w, h, fps)
+                format!(
+                    "[0:v]split=2[rec_raw][prev_raw];\
+                     [rec_raw]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,fps={}[rec];\
+                     [prev_raw]scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,fps=15[prev]",
+                    w, h, w, h, fps
+                )
             } else {
-                format!("[0:v]split=2[rec_raw][prev_raw];[rec_raw]fps={}[rec];[prev_raw]scale=320:180,fps=15[prev]", fps)
+                format!(
+                    "[0:v]split=2[rec_raw][prev_raw];\
+                     [rec_raw]fps={}[rec];\
+                     [prev_raw]scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,fps=15[prev]",
+                    fps
+                )
             }
         } else {
-            format!("[0:v]split=2[rec_raw][prev_raw];[rec_raw]fps={}[rec];[prev_raw]scale=320:180,fps=15[prev]", fps)
+            format!(
+                "[0:v]split=2[rec_raw][prev_raw];\
+                 [rec_raw]fps={}[rec];\
+                 [prev_raw]scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,fps=15[prev]",
+                fps
+            )
         };
 
         cmd.args(["-filter_complex", &filter_str]);
@@ -373,3 +389,86 @@ impl Drop for StreamRecorder {
         let _ = self.stop();
     }
 }
+
+pub struct AudioTrackMonitor {
+    child: Option<Child>,
+    peak_level: Arc<AtomicU32>, // (0..10000)
+    device_index: usize,
+}
+
+impl AudioTrackMonitor {
+    pub fn new(device_index: usize) -> Self {
+        let peak_level = Arc::new(AtomicU32::new(0));
+
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args([
+            "-y",
+            "-f", "avfoundation",
+            "-i", &format!("none:{}", device_index),
+            "-vn",
+            "-ac", "1",
+            "-ar", "8000",
+            "-f", "f32le",
+            "pipe:1",
+        ]);
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::null());
+
+        let mut child = cmd.spawn().ok();
+
+        if let Some(ch) = child.as_mut() {
+            if let Some(stdout) = ch.stdout.take() {
+                let peak_clone = Arc::clone(&peak_level);
+                thread::spawn(move || {
+                    use std::io::Read;
+                    let mut reader = BufReader::with_capacity(1024, stdout);
+                    let mut buf = [0u8; 1024]; // 256 samples of 8kHz f32 = 32ms
+                    while reader.read_exact(&mut buf).is_ok() {
+                        let mut max_abs: f32 = 0.0;
+                        for chunk in buf.chunks_exact(4) {
+                            let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).abs();
+                            if sample > max_abs {
+                                max_abs = sample;
+                            }
+                        }
+                        // Scale response slightly so natural speech is well-represented in the green/amber zones
+                        let boost = (max_abs * 2.5).clamp(0.0, 1.0);
+                        let int_val = (boost * 10000.0) as u32;
+                        peak_clone.store(int_val, Ordering::Relaxed);
+                    }
+                    peak_clone.store(0, Ordering::Relaxed);
+                });
+            }
+        }
+
+        Self {
+            child,
+            peak_level,
+            device_index,
+        }
+    }
+
+    pub fn device_index(&self) -> usize {
+        self.device_index
+    }
+
+    pub fn get_peak(&self) -> f32 {
+        let val = self.peak_level.load(Ordering::Relaxed);
+        (val as f32) / 10000.0
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for AudioTrackMonitor {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
