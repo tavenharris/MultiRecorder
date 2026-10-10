@@ -11,7 +11,7 @@ embed_timecode = true
 name = "gameplay"
 video_device = "1"
 resolution = "1920x1080"
-fps = 60
+fps = 30
 video_bitrate = "30M"
 encoder = "h264_videotoolbox"
 

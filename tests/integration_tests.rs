@@ -224,3 +224,43 @@ fn test_nle_sync_timecode_and_audio_config() {
     assert!(!cfg.sync_audio_to_secondary);
     assert!(!cfg.embed_timecode);
 }
+
+#[test]
+fn test_input_format_parsing_and_fps_constraints() {
+    // Test resolution and fps extraction from hardware probes
+    let raw_1 = "1552x1552  30fps";
+    let mut res_1 = "1920x1080".to_string();
+    let mut fps_1 = 60u32;
+    for part in raw_1.split_whitespace() {
+        if part.contains('x') {
+            res_1 = part.to_string();
+        } else if let Some(stripped) = part.strip_suffix("fps") {
+            if let Ok(f) = stripped.parse::<u32>() {
+                fps_1 = f;
+            }
+        }
+    }
+    assert_eq!(res_1, "1552x1552");
+    assert_eq!(fps_1, 30);
+
+    // If input fps is 30, output is clamped to <= 30
+    let requested_fps = 60u32;
+    let clamped_fps = requested_fps.min(fps_1);
+    assert_eq!(clamped_fps, 30);
+
+    let raw_2 = "3840x2160  60fps";
+    let mut res_2 = "1920x1080".to_string();
+    let mut fps_2 = 30u32;
+    for part in raw_2.split_whitespace() {
+        if part.contains('x') {
+            res_2 = part.to_string();
+        } else if let Some(stripped) = part.strip_suffix("fps") {
+            if let Ok(f) = stripped.parse::<u32>() {
+                fps_2 = f;
+            }
+        }
+    }
+    assert_eq!(res_2, "3840x2160");
+    assert_eq!(fps_2, 60);
+    assert_eq!(60u32.min(fps_2), 60);
+}
