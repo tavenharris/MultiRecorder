@@ -424,10 +424,20 @@ impl MultiRecordingApp {
 
         let mut success = true;
         for (i, src) in sources_to_record.iter().enumerate() {
-            // Only primary video stream attaches discrete multi-track audio;
-            // secondary streams record pure video to avoid macOS microphone contention.
+            // Primary video stream attaches all discrete audio tracks (1..5);
+            // Secondary video stream attaches Track 1 if sync_audio_to_secondary is enabled for NLE waveform sync.
             let tracks = if i == 0 {
                 self.config.audio_tracks.clone()
+            } else if i == 1 && self.config.sync_audio_to_secondary {
+                if let Some(t1) = self.config.audio_tracks.first().cloned() {
+                    if t1.enabled {
+                        vec![t1]
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
             } else {
                 vec![]
             };
@@ -482,6 +492,25 @@ impl MultiRecordingApp {
         let mut exported_files = Vec::new();
         let mut total_size = 0.0;
 
+        // Compute synchronized session start timecode across both streams
+        let shared_timecode = if self.config.embed_timecode {
+            let mut found_tc = None;
+            for mgr in &self.managers {
+                if let Ok(segs) = mgr.get_segments_for_duration(target_duration) {
+                    if !segs.is_empty() {
+                        found_tc = Some(Remuxer::extract_start_timecode_from_segments(&segs));
+                        break;
+                    }
+                }
+            }
+            found_tc.or_else(|| {
+                let start_time = chrono::Local::now() - chrono::Duration::seconds(duration_secs as i64);
+                Some(start_time.format("%H:%M:%S:00").to_string())
+            })
+        } else {
+            None
+        };
+
         for mgr in &self.managers {
             let segments = match mgr.get_segments_for_duration(target_duration) {
                 Ok(s) => s,
@@ -512,7 +541,7 @@ impl MultiRecordingApp {
                 out_ext
             ));
 
-            if let Err(e) = Remuxer::stitch_segments(&segments, &out_file) {
+            if let Err(e) = Remuxer::stitch_segments(&segments, &out_file, shared_timecode.as_deref()) {
                 self.status_message = Some((format!("Remuxing failed: {}", e), Instant::now(), true));
                 return;
             }
@@ -1023,7 +1052,26 @@ impl eframe::App for MultiRecordingApp {
                             ui.separator();
                             ui.add_space(8.0);
 
-                            // --- Row 5: Hardware & System Audio Driver ---
+                            // --- Row 5: NLE Multicam & Post Sync (Premiere Pro / DaVinci Resolve) ---
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("🔗 NLE Post Sync:").strong().color(Color32::from_rgb(244, 244, 245)));
+
+                                if ui.checkbox(&mut self.config.sync_audio_to_secondary, "Mirror Track 1 Audio to Video 2 (Waveform Sync)").changed() {
+                                    let _ = self.config.save_to_file(&self.config_path);
+                                }
+
+                                ui.add_space(16.0);
+
+                                if ui.checkbox(&mut self.config.embed_timecode, "Embed SMPTE Timecode (Timecode Sync)").changed() {
+                                    let _ = self.config.save_to_file(&self.config_path);
+                                }
+                            });
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+
+                            // --- Row 6: Hardware & System Audio Driver ---
                             ui.horizontal(|ui| {
                                 if self.has_loopback {
                                     ui.label(RichText::new("● BlackHole Loopback Driver: Installed & Active").color(Color32::from_rgb(16, 185, 129)).size(11.0));

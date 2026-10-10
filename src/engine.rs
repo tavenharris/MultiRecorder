@@ -76,10 +76,20 @@ impl RecordingEngine {
         println!("  [{}] : Graceful exit / stop recording", "Q / Esc".red().bold());
         println!("{}", "────────────────────────────────────────────────────────────────".cyan());
 
-        // Spawn recorders (primary stream captures audio tracks, secondary streams capture video-only)
+        // Spawn recorders (primary stream captures audio tracks, secondary streams capture video + optional sync track)
         for (i, src) in self.config.sources.clone().into_iter().enumerate() {
             let tracks = if i == 0 {
                 self.config.audio_tracks.clone()
+            } else if i == 1 && self.config.sync_audio_to_secondary {
+                if let Some(t1) = self.config.audio_tracks.first().cloned() {
+                    if t1.enabled {
+                        vec![t1]
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
             } else {
                 vec![]
             };
@@ -167,6 +177,24 @@ impl RecordingEngine {
         let target_duration = Duration::from_secs(duration_secs);
         let mut exported_files = Vec::new();
 
+        let shared_timecode = if self.config.embed_timecode {
+            let mut found_tc = None;
+            for mgr in &self.managers {
+                if let Ok(segs) = mgr.get_segments_for_duration(target_duration) {
+                    if !segs.is_empty() {
+                        found_tc = Some(Remuxer::extract_start_timecode_from_segments(&segs));
+                        break;
+                    }
+                }
+            }
+            found_tc.or_else(|| {
+                let start_time = chrono::Local::now() - chrono::Duration::seconds(duration_secs as i64);
+                Some(start_time.format("%H:%M:%S:00").to_string())
+            })
+        } else {
+            None
+        };
+
         for mgr in &self.managers {
             let segments = mgr.get_segments_for_duration(target_duration)?;
             if segments.is_empty() {
@@ -177,12 +205,18 @@ impl RecordingEngine {
                 continue;
             }
 
+            let out_ext = if self.config.output_format.trim().is_empty() {
+                "mp4"
+            } else {
+                &self.config.output_format
+            };
             let stream_output = self.config.output_dir.join(format!(
-                "Flashback_{}_{}.mp4",
+                "Flashback_{}_{}.{}",
                 timestamp,
-                mgr.source_name()
+                mgr.source_name(),
+                out_ext
             ));
-            Remuxer::stitch_segments(&segments, &stream_output)?;
+            Remuxer::stitch_segments(&segments, &stream_output, shared_timecode.as_deref())?;
             exported_files.push(stream_output);
         }
 

@@ -322,23 +322,36 @@ enabled = false
 name = "AirPods / Aux"
 device_index = 0
 device_id = "none"
+# Post-Production Sync Settings (Settings Drawer)
+# Mirrors Track 1 audio onto Video 2 for NLE audio waveform sync
+sync_audio_to_secondary = true
+
+# Embeds standard SMPTE Timecode track (tmcd) and metadata for NLE timecode sync
+embed_timecode = true
 ```
 
 ---
 
-## NLE Multicam Workflow (Premiere Pro / DaVinci Resolve)
+## NLE Multicam & Post-Production Sync (Premiere Pro / DaVinci Resolve)
 
-1. Hit `Space` or `F` during a gaming session.
-2. Two synchronized video files are created:
-   - `Flashback_[Timestamp]_gameplay.mp4` (contains video + all 5 discrete audio tracks)
-   - `Flashback_[Timestamp]_facecam.mp4` (contains camera video)
-3. Drag both files into **Adobe Premiere Pro** or **DaVinci Resolve**.
-4. In Premiere Pro:
-   - Select both clips -> Right-Click -> **Create Multi-Camera Source Sequence**.
-   - Set Synchronize Point to **Clip Start**.
-   - Open sequence in timeline: Video 1 is Gameplay, Video 2 is Facecam, and Audio Tracks A1 through A5 are pre-labeled with custom names (`Game Audio`, `Microphone`, `Discord`, etc.) ready for volume mixing and editing!
+MultiRecording supports both industry-standard synchronization methods for multi-camera editing:
 
----
+### Method A: Synchronize by Timecode (Frame-Accurate)
+1. In the **Settings Drawer**, ensure **Embed SMPTE Timecode** is enabled (default: ON).
+2. When a flashback is exported, MultiRecording stamps identical SMPTE Time-of-Day timecode (e.g. `14:32:15:00`) into the standard QuickTime/MP4 `tmcd` track and metadata of both `gameplay` and `facecam` files.
+3. In **Adobe Premiere Pro** or **DaVinci Resolve**:
+   - Select both clips in your project bin or timeline.
+   - Right-click -> **Synchronize...** -> select **Timecode**.
+   - *(Or right-click -> **Create Multi-Camera Source Sequence** -> Synchronize Point: **Timecode**)*.
+   - Premiere Pro instantly snaps both video feeds into perfect frame-accurate synchronization!
+
+### Method B: Synchronize by Audio Waveform
+1. In the **Settings Drawer**, ensure **Mirror Track 1 Audio to Video 2** is enabled (default: ON).
+2. MultiRecording attaches your primary audio (e.g., Game Audio or Microphone) as the reference audio track for your secondary camera file as well.
+3. In **Adobe Premiere Pro** or **DaVinci Resolve**:
+   - Select both clips in your sequence.
+   - Right-click -> **Synchronize...** -> select **Audio** -> **Track 1**.
+   - Premiere Pro compares the audio waveforms between both clips and aligns them automatically!
 
 ## Testing Suite
 

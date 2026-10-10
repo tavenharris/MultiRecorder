@@ -24,6 +24,20 @@ pub struct Config {
     /// Audio bitrate for recorded tracks ("320k", "256k", "192k")
     #[serde(default = "default_audio_bitrate")]
     pub audio_bitrate: String,
+    /// Mirror Audio Track 1 onto Video 2 recording for NLE waveform sync
+    #[serde(default = "default_sync_audio_to_secondary")]
+    pub sync_audio_to_secondary: bool,
+    /// Embed standardized SMPTE Timecode track and metadata for NLE timecode sync
+    #[serde(default = "default_embed_timecode")]
+    pub embed_timecode: bool,
+}
+
+fn default_sync_audio_to_secondary() -> bool {
+    true
+}
+
+fn default_embed_timecode() -> bool {
+    true
 }
 
 fn default_output_format() -> String {
@@ -128,6 +142,8 @@ impl Default for Config {
             audio_tracks: default_audio_tracks(),
             output_format: "mp4".to_string(),
             audio_bitrate: "320k".to_string(),
+            sync_audio_to_secondary: true,
+            embed_timecode: true,
         }
     }
 }
@@ -161,6 +177,8 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.output_format, "mp4");
         assert_eq!(cfg.audio_bitrate, "320k");
+        assert!(cfg.sync_audio_to_secondary);
+        assert!(cfg.embed_timecode);
         assert_eq!(cfg.sources.len(), 2);
         assert_eq!(cfg.audio_tracks.len(), 5);
         assert_eq!(cfg.sources[0].resolution, Some("1920x1080".to_string()));
@@ -172,6 +190,8 @@ mod tests {
         let mut cfg = Config::default();
         cfg.output_format = "mkv".to_string();
         cfg.audio_bitrate = "256k".to_string();
+        cfg.sync_audio_to_secondary = false;
+        cfg.embed_timecode = true;
         cfg.sources[0].resolution = Some("3840x2160".to_string());
         cfg.sources[0].fps = Some(60);
 
@@ -179,6 +199,8 @@ mod tests {
         let loaded: Config = toml::from_str(&toml_str).unwrap();
         assert_eq!(loaded.output_format, "mkv");
         assert_eq!(loaded.audio_bitrate, "256k");
+        assert!(!loaded.sync_audio_to_secondary);
+        assert!(loaded.embed_timecode);
         assert_eq!(loaded.sources[0].resolution, Some("3840x2160".to_string()));
     }
 }

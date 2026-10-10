@@ -11,6 +11,7 @@ impl Remuxer {
     pub fn stitch_segments(
         segments: &[PathBuf],
         output_file: &Path,
+        timecode: Option<&str>,
     ) -> Result<()> {
         if segments.is_empty() {
             bail!("No segments provided to remux");
@@ -62,6 +63,15 @@ impl Remuxer {
             .map(|ext| ext.eq_ignore_ascii_case("mkv"))
             .unwrap_or(false);
 
+        if let Some(tc) = timecode {
+            if !is_mkv {
+                // MP4 and MOV support dedicated tmcd timecode track + metadata
+                cmd.args(["-timecode", tc, "-metadata", &format!("timecode={}", tc)]);
+            } else {
+                cmd.args(["-metadata", &format!("timecode={}", tc)]);
+            }
+        }
+
         if !is_mkv {
             cmd.args(["-movflags", "+faststart"]);
         }
@@ -79,6 +89,23 @@ impl Remuxer {
 
         tracing::info!("Successfully exported {:?}", output_file);
         Ok(())
+    }
+
+    /// Extracts a standard SMPTE timecode (HH:MM:SS:00) from the first segment's filename or current time
+    pub fn extract_start_timecode_from_segments(segments: &[PathBuf]) -> String {
+        if let Some(first) = segments.first() {
+            let name = first.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
+            if let Some(pos) = name.rfind('_') {
+                let time_part = &name[pos + 1..];
+                if time_part.len() >= 6 && time_part.chars().all(|c| c.is_ascii_digit()) {
+                    let hh = &time_part[0..2];
+                    let mm = &time_part[2..4];
+                    let ss = &time_part[4..6];
+                    return format!("{}:{}:{}:00", hh, mm, ss);
+                }
+            }
+        }
+        Local::now().format("%H:%M:%S:00").to_string()
     }
 
     /// Generates standard session timestamp for output files
@@ -101,9 +128,24 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_timecode_from_segments() {
+        let segs = vec![
+            PathBuf::from("/tmp/gameplay_20261010_143215.mp4"),
+            PathBuf::from("/tmp/gameplay_20261010_143217.mp4"),
+        ];
+        let tc = Remuxer::extract_start_timecode_from_segments(&segs);
+        assert_eq!(tc, "14:32:15:00");
+
+        let empty: Vec<PathBuf> = vec![];
+        let fallback_tc = Remuxer::extract_start_timecode_from_segments(&empty);
+        assert_eq!(fallback_tc.len(), 11); // HH:MM:SS:00
+        assert!(fallback_tc.ends_with(":00"));
+    }
+
+    #[test]
     fn test_stitch_empty_segments_fails() {
         let dummy_out = PathBuf::from("/tmp/dummy_test_out.mp4");
-        let result = Remuxer::stitch_segments(&[], &dummy_out);
+        let result = Remuxer::stitch_segments(&[], &dummy_out, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No segments provided"));
     }

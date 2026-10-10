@@ -91,7 +91,7 @@ MultiRecording avoids this by:
    -metadata:s:a:1 title="Microphone"
    -metadata:s:a:2 title="Discord / Chat"
    ```
-3. **Pure Video Secondary Feeds**: Stream 2 (Facecam) captures video-only (`-i <dev>:none`), avoiding audio hardware lockups.
+3. **Optional Track 1 Mirroring for Video 2**: When `sync_audio_to_secondary` is enabled in Settings, Stream 2 (Facecam) attaches a copy of Track 1 (`-i <video_device>:<track_1_idx>`). This writes the primary audio waveform into both video files without claiming extra devices, allowing NLEs like Premiere Pro and DaVinci Resolve to synchronize the two video tracks via audio waveform alignment.
 
 ---
 
@@ -107,17 +107,19 @@ The [`RingBufferManager`](file:///Users/tavenharris/Library/Mobile%20Documents/c
 
 ---
 
-## 6. Remuxing & Container Handling
+## 6. Remuxing, Timecode & Container Handling
 
 When the user triggers a flashback:
-1. MultiRecording creates a temporary concat manifest file (`multirec_concat_<uuid>.txt`):
+1. MultiRecording extracts the session start timecode from the earliest segment in the selected sequence (or calculates Time-of-Day `HH:MM:SS:00`).
+2. Creates a temporary concat manifest file (`multirec_concat_<uuid>.txt`):
    ```text
    file '/tmp/multirecording_buffer/gameplay_20261010_120000.mp4'
    file '/tmp/multirecording_buffer/gameplay_20261010_120002.mp4'
    ...
    ```
-2. Invokes FFmpeg concat demuxer:
+3. Invokes FFmpeg concat demuxer:
    ```bash
-   ffmpeg -y -f concat -safe 0 -i <manifest> -c copy [-movflags +faststart] <output_file>
+   ffmpeg -y -f concat -safe 0 -i <manifest> -c copy -timecode 14:32:15:00 -metadata timecode="14:32:15:00" [-movflags +faststart] <output_file>
    ```
-3. If the container is `.mp4` or `.mov`, `-movflags +faststart` shifts the `moov` atom to the beginning of the file, allowing instant playback in media players and NLE video editors. If the user selected `.mkv`, the flag is omitted to maintain container compliance.
+4. **Timecode Track (`tmcd`)**: In `.mp4` and `.mov` containers, `-timecode` creates a dedicated SMPTE timecode track (`tmcd`) alongside metadata. Premiere Pro reads this track to enable frame-accurate multi-camera synchronization by Timecode.
+5. **Streaming Atom Optimization**: For `.mp4` and `.mov`, `-movflags +faststart` shifts the `moov` atom to the beginning of the file, allowing instant playback and scrubbing in editing timelines. For `.mkv`, Matroska metadata tags are used.

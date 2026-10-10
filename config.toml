@@ -4,6 +4,8 @@ output_dir = "recordings"
 buffer_dir = "/tmp/multirecording_buffer"
 output_format = "mp4"
 audio_bitrate = "256k"
+sync_audio_to_secondary = true
+embed_timecode = true
 
 [[sources]]
 name = "gameplay"
@@ -20,10 +22,10 @@ video_bitrate = "8M"
 encoder = "h264_videotoolbox"
 
 [[audio_tracks]]
-enabled = false
+enabled = true
 name = "MacBook Pro Microphone"
 device_index = 0
-device_id = "none"
+device_id = "in:0"
 
 [[audio_tracks]]
 enabled = false

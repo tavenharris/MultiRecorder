@@ -203,3 +203,24 @@ fn test_session_timestamp_structure() {
     assert_eq!(parts[0].len(), 8);
     assert_eq!(parts[1].len(), 6);
 }
+
+#[test]
+fn test_nle_sync_timecode_and_audio_config() {
+    let mut cfg = Config::default();
+    assert!(cfg.sync_audio_to_secondary);
+    assert!(cfg.embed_timecode);
+
+    // Verify timecode extraction from segment filenames
+    let segs = vec![
+        std::path::PathBuf::from("/tmp/gameplay_20261010_184530.mp4"),
+        std::path::PathBuf::from("/tmp/gameplay_20261010_184532.mp4"),
+    ];
+    let tc = Remuxer::extract_start_timecode_from_segments(&segs);
+    assert_eq!(tc, "18:45:30:00");
+
+    // Toggle configuration
+    cfg.sync_audio_to_secondary = false;
+    cfg.embed_timecode = false;
+    assert!(!cfg.sync_audio_to_secondary);
+    assert!(!cfg.embed_timecode);
+}
