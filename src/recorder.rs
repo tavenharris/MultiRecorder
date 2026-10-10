@@ -1,4 +1,4 @@
-use crate::config::SourceConfig;
+use crate::config::{AudioTrackConfig, SourceConfig};
 use anyhow::{bail, Context, Result};
 use std::collections::VecDeque;
 use std::fs::{self, File};
@@ -10,6 +10,7 @@ use std::thread;
 
 pub struct StreamRecorder {
     source: SourceConfig,
+    audio_tracks: Vec<AudioTrackConfig>,
     child: Option<Child>,
     segment_duration_secs: u64,
     recent_logs: Arc<Mutex<VecDeque<String>>>,
@@ -17,13 +18,18 @@ pub struct StreamRecorder {
 }
 
 impl StreamRecorder {
-    pub fn new(source: SourceConfig, segment_duration_secs: u64) -> Self {
+    pub fn new(
+        source: SourceConfig,
+        audio_tracks: Vec<AudioTrackConfig>,
+        segment_duration_secs: u64,
+    ) -> Self {
         let log_dir = PathBuf::from("/tmp/multirecording_logs");
         let _ = fs::create_dir_all(&log_dir);
         let log_file_path = log_dir.join(format!("{}.log", source.name));
 
         Self {
             source,
+            audio_tracks,
             child: None,
             segment_duration_secs,
             recent_logs: Arc::new(Mutex::new(VecDeque::with_capacity(50))),
@@ -48,13 +54,6 @@ impl StreamRecorder {
     }
 
     pub fn start(&mut self, buffer_dir: &Path) -> Result<()> {
-        let input_arg = match &self.source.audio_device {
-            Some(audio) if !audio.is_empty() && audio != "none" => {
-                format!("{}:{}", self.source.video_device, audio)
-            }
-            _ => format!("{}:none", self.source.video_device),
-        };
-
         let segment_pattern = buffer_dir
             .join(format!("{}_%Y%m%d_%H%M%S.mp4", self.source.name))
             .to_string_lossy()
@@ -63,11 +62,53 @@ impl StreamRecorder {
         let fps = self.source.fps.unwrap_or(30);
         let gop_size = fps * self.segment_duration_secs as u32;
 
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args(["-y", "-f", "avfoundation"]);
+        let enabled_tracks: Vec<&AudioTrackConfig> = self
+            .audio_tracks
+            .iter()
+            .filter(|t| t.enabled)
+            .collect();
 
-        // Input device
-        cmd.args(["-i", &input_arg]);
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-y"]);
+
+        // Input 0: Video device + first enabled audio device (if any)
+        if let Some(first_track) = enabled_tracks.first() {
+            cmd.args([
+                "-f",
+                "avfoundation",
+                "-i",
+                &format!("{}:{}", self.source.video_device, first_track.device_index),
+            ]);
+        } else {
+            cmd.args([
+                "-f",
+                "avfoundation",
+                "-i",
+                &format!("{}:none", self.source.video_device),
+            ]);
+        }
+
+        // Inputs 1..N: Additional audio devices (Tracks 2..5)
+        for track in enabled_tracks.iter().skip(1) {
+            cmd.args([
+                "-f",
+                "avfoundation",
+                "-i",
+                &format!("none:{}", track.device_index),
+            ]);
+        }
+
+        // Map video from input 0
+        cmd.args(["-map", "0:v"]);
+
+        // Map each audio stream with its dedicated track title metadata
+        for (i, track) in enabled_tracks.iter().enumerate() {
+            cmd.args(["-map", &format!("{}:a", i)]);
+            cmd.args([
+                &format!("-metadata:s:a:{}", i),
+                &format!("title={}", track.name),
+            ]);
+        }
 
         // Output framerate & GOP boundary alignment (Crucial for segmenting)
         cmd.args(["-r", &fps.to_string()]);
@@ -90,8 +131,8 @@ impl StreamRecorder {
             "yuv420p",
         ]);
 
-        // Audio encoder settings
-        if self.source.audio_device.is_some() {
+        // Audio encoder settings (applied to all mapped audio tracks)
+        if !enabled_tracks.is_empty() {
             cmd.args(["-c:a", "aac", "-b:a", "320k"]);
         }
 
@@ -116,8 +157,9 @@ impl StreamRecorder {
         cmd.stderr(Stdio::piped());
 
         tracing::info!(
-            "Starting recorder for source [{}] with cmd: {:?}",
+            "Starting recorder for source [{}] (audio tracks: {}) with cmd: {:?}",
             self.source.name,
+            enabled_tracks.len(),
             cmd
         );
 
@@ -177,7 +219,7 @@ impl StreamRecorder {
                         if err_summary.is_empty() { "No stderr captured" } else { &err_summary }
                     );
                 }
-                None => Ok(()), // Still running smoothly
+                None => Ok(()),
             }
         } else {
             bail!("Recorder not running");

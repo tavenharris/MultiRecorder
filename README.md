@@ -7,6 +7,8 @@ A native, high-performance macOS application built in Rust for dual-PC gaming, s
 ## Key Features
 
 - **Multi-Source Video Capture**: Record your 4K60 capture card (gameplay) and 1080p webcam (facecam) at the same time.
+- **Up to 5 Discrete Audio Tracks**: Record up to 5 isolated audio channels simultaneously (e.g., Game Audio, Microphone, Discord/Chat, Desktop/Music, and Soundboard/Aux).
+- **Embedded Track Labels**: Custom track titles are written directly into MP4 metadata so Premiere Pro & DaVinci Resolve timelines automatically name your audio tracks (`A1: Game Audio`, `A2: Microphone`, etc.)!
 - **Hardware-Accelerated Encoding**: Zero CPU strain while gaming—uses Apple Silicon's hardware `h264_videotoolbox`, `hevc_videotoolbox`, or `prores_videotoolbox`.
 - **Rolling Flashback Ring Buffer**: Automatically keeps the last $X$ minutes of footage (configurable, e.g., 5, 10, or 15 mins) on a fast temporary SSD ring buffer, evicting expired segments continuously.
 - **Sub-Second Lossless Remuxing**: Hit `F` or `Space` at any time to immediately save the last $X$ minutes. Clips are stitched with direct stream copy (`-c copy`) in ~2 seconds without re-encoding!
@@ -30,9 +32,10 @@ cargo run -- gui
 - **Retroactive Flashback Card**:
   - Buffer Duration Chips: `[ 1m ]`, `[ 3m ]`, `[ 5m ]`, `[ 10m ]`, `[ 15m ]`.
   - Master Action Button: Large coral flat button: **`⚡ SAVE LAST 5 MINS [Space / F]`**.
-- **Dual-Source Configuration Cards**:
-  - **Source 1 (Gameplay)**: Live AVFoundation dropdowns for Video (Elgato Capture Card) & HDMI Audio. Shows real-time buffered chunk count and disk MB.
-  - **Source 2 (Facecam)**: Live dropdowns for Webcam / DSLR and USB microphone.
+- **Dual-Source Video Feeds**: Independent capture card and webcam device pickers.
+- **🎚 Multi-Track Audio Mixer (Up to 5 Tracks)**:
+  - Toggle and label each track individually (`Game Audio`, `Microphone`, `Discord`, `Music`, `Aux`).
+  - Assign any hardware audio device to each track with individual active/muted status indicators.
 - **Export History & Reveal**: List of all exported flashback sessions with file sizes and a 1-click **"Reveal in Finder"** button.
 
 ---

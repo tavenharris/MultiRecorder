@@ -5,9 +5,42 @@ buffer_dir = "/tmp/multirecording_buffer"
 
 [[sources]]
 name = "gameplay"
-video_device = "3"
-audio_device = "0"
+video_device = "0"
 resolution = "1920x1080"
 fps = 60
 video_bitrate = "40M"
 encoder = "h264_videotoolbox"
+
+[[sources]]
+name = "facecam"
+video_device = "0"
+resolution = "1920x1080"
+fps = 60
+video_bitrate = "15M"
+encoder = "h264_videotoolbox"
+
+# Up to 5 Discrete Multi-Track Audio Sources
+[[audio_tracks]]
+enabled = true
+name = "Game Audio"
+device_index = 0
+
+[[audio_tracks]]
+enabled = true
+name = "Microphone"
+device_index = 0
+
+[[audio_tracks]]
+enabled = false
+name = "Discord / Chat"
+device_index = 0
+
+[[audio_tracks]]
+enabled = false
+name = "Desktop / Music"
+device_index = 0
+
+[[audio_tracks]]
+enabled = false
+name = "Aux / Soundboard"
+device_index = 0

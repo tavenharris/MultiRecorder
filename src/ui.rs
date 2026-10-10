@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use crate::config::Config;
+use crate::config::{AudioTrackConfig, Config};
 use crate::devices::{Device, DeviceManager, DeviceType};
 use crate::recorder::StreamRecorder;
 use crate::remuxer::Remuxer;
@@ -23,6 +23,7 @@ pub struct MultiRecordingApp {
     config: Config,
     config_path: PathBuf,
     discovered_devices: Vec<Device>,
+    has_loopback: bool,
 
     // Engine runtime state
     is_recording: bool,
@@ -35,11 +36,10 @@ pub struct MultiRecordingApp {
     recent_exports: Vec<ExportRecord>,
     selected_flashback_secs: u64,
 
-    // Selected device indices for UI dropdowns
+    // Selected video device indices
     game_video_idx: usize,
-    game_audio_idx: usize,
     cam_video_idx: usize,
-    cam_audio_idx: usize,
+    copied_brew_cmd_until: Option<Instant>,
 }
 
 impl MultiRecordingApp {
@@ -55,12 +55,14 @@ impl MultiRecordingApp {
         };
 
         let devices = DeviceManager::list_devices().unwrap_or_default();
+        let has_loopback = DeviceManager::has_loopback_device(&devices);
         let selected_secs = cfg.buffer_duration_secs;
 
         let mut app = Self {
             config: cfg,
             config_path,
             discovered_devices: devices,
+            has_loopback,
             is_recording: false,
             recorders: Vec::new(),
             managers: Vec::new(),
@@ -69,13 +71,27 @@ impl MultiRecordingApp {
             recent_exports: Vec::new(),
             selected_flashback_secs: selected_secs,
             game_video_idx: 0,
-            game_audio_idx: 0,
             cam_video_idx: 0,
-            cam_audio_idx: 0,
+            copied_brew_cmd_until: None,
         };
 
         app.sync_device_selections();
         app
+    }
+
+    pub fn refresh_devices(&mut self) {
+        self.discovered_devices = DeviceManager::list_devices().unwrap_or_default();
+        self.has_loopback = DeviceManager::has_loopback_device(&self.discovered_devices);
+        self.sync_device_selections();
+        self.status_message = Some((
+            format!(
+                "Devices refreshed: {} sources found (Loopback: {})",
+                self.discovered_devices.len(),
+                if self.has_loopback { "Active" } else { "Not Installed" }
+            ),
+            Instant::now(),
+            false,
+        ));
     }
 
     fn apply_flat_theme(ctx: &egui::Context) {
@@ -113,12 +129,27 @@ impl MultiRecordingApp {
     fn sync_device_selections(&mut self) {
         if let Some(src) = self.config.sources.first() {
             self.game_video_idx = src.video_device.parse().unwrap_or(0);
-            self.game_audio_idx = src.audio_device.as_ref().and_then(|a| a.parse().ok()).unwrap_or(0);
         }
         if self.config.sources.len() > 1 {
             let src2 = &self.config.sources[1];
             self.cam_video_idx = src2.video_device.parse().unwrap_or(0);
-            self.cam_audio_idx = src2.audio_device.as_ref().and_then(|a| a.parse().ok()).unwrap_or(0);
+        }
+
+        // Ensure exactly 5 audio tracks are configured
+        while self.config.audio_tracks.len() < 5 {
+            let idx = self.config.audio_tracks.len() + 1;
+            self.config.audio_tracks.push(AudioTrackConfig {
+                enabled: false,
+                name: format!("Track {}", idx),
+                device_index: 0,
+                device_id: format!("in:0"),
+            });
+        }
+
+        for track in &mut self.config.audio_tracks {
+            if track.device_id.is_empty() {
+                track.device_id = format!("in:{}", track.device_index);
+            }
         }
     }
 
@@ -132,7 +163,7 @@ impl MultiRecordingApp {
     fn audio_devices(&self) -> Vec<&Device> {
         self.discovered_devices
             .iter()
-            .filter(|d| d.device_type == DeviceType::Audio)
+            .filter(|d| d.device_type == DeviceType::AudioInput || d.device_type == DeviceType::AudioOutput)
             .collect()
     }
 
@@ -141,18 +172,45 @@ impl MultiRecordingApp {
             return;
         }
 
+        // Pre-validate audio tracks
+        for track in &self.config.audio_tracks {
+            if track.enabled {
+                if let Some(dev) = self.discovered_devices.iter().find(|d| d.id == track.device_id) {
+                    if dev.device_type == DeviceType::AudioOutput && dev.av_index.is_none() {
+                        self.status_message = Some((
+                            format!(
+                                "⚠️ Track '{}' is set to '{}' (Audio Output). On macOS, capturing speaker/AirPods audio requires BlackHole 2ch loopback.",
+                                track.name, dev.name
+                            ),
+                            Instant::now(),
+                            true,
+                        ));
+                        return;
+                    }
+                }
+            }
+        }
+
         let _ = fs::create_dir_all(&self.config.buffer_dir);
         let _ = fs::create_dir_all(&self.config.output_dir);
 
         // Sync dropdown selections into config
         if let Some(src1) = self.config.sources.first_mut() {
             src1.video_device = self.game_video_idx.to_string();
-            src1.audio_device = Some(self.game_audio_idx.to_string());
         }
         if self.config.sources.len() > 1 {
             self.config.sources[1].video_device = self.cam_video_idx.to_string();
-            self.config.sources[1].audio_device = Some(self.cam_audio_idx.to_string());
         }
+
+        // Map audio device indices
+        for track in &mut self.config.audio_tracks {
+            if let Some(dev) = self.discovered_devices.iter().find(|d| d.id == track.device_id) {
+                if let Some(av_idx) = dev.av_index {
+                    track.device_index = av_idx;
+                }
+            }
+        }
+
         let _ = self.config.save_to_file(&self.config_path);
 
         self.managers.clear();
@@ -168,7 +226,11 @@ impl MultiRecordingApp {
 
         let mut success = true;
         for src in self.config.sources.clone() {
-            let mut recorder = StreamRecorder::new(src.clone(), self.config.segment_duration_secs);
+            let mut recorder = StreamRecorder::new(
+                src.clone(),
+                self.config.audio_tracks.clone(),
+                self.config.segment_duration_secs,
+            );
             if let Err(e) = recorder.start(&self.config.buffer_dir) {
                 self.status_message = Some((
                     format!("Failed to start stream [{}]: {}", src.name, e),
@@ -184,7 +246,7 @@ impl MultiRecordingApp {
         if success {
             self.is_recording = true;
             self.status_message = Some((
-                "Recording active! Rolling buffer is buffering...".to_string(),
+                "Recording active! Multi-track buffer is live...".to_string(),
                 Instant::now(),
                 false,
             ));
@@ -221,7 +283,7 @@ impl MultiRecordingApp {
 
             if segments.is_empty() {
                 self.status_message = Some((
-                    format!("No segments ready yet for stream [{}]! Wait 5 seconds.", mgr.source_name()),
+                    format!("No segments ready yet for stream [{}]! Wait a few seconds.", mgr.source_name()),
                     Instant::now(),
                     true,
                 ));
@@ -302,7 +364,7 @@ impl eframe::App for MultiRecordingApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(6.0);
 
             // ==========================================
             // TOP BAR: Brand & Engine State
@@ -310,6 +372,11 @@ impl eframe::App for MultiRecordingApp {
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("MULTI-RECORDING").font(FontId::new(20.0, FontFamily::Proportional)).strong().color(Color32::from_rgb(244, 244, 245)));
                 ui.label(RichText::new("PRO").size(11.0).background_color(Color32::from_rgb(39, 39, 42)).color(Color32::from_rgb(161, 161, 170)));
+
+                ui.add_space(8.0);
+                if ui.add(egui::Button::new(RichText::new("🔄 Refresh Devices").size(11.0).color(Color32::from_rgb(161, 161, 170)))).clicked() {
+                    self.refresh_devices();
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.is_recording {
@@ -326,9 +393,9 @@ impl eframe::App for MultiRecordingApp {
                 });
             });
 
-            ui.add_space(10.0);
+            ui.add_space(8.0);
             ui.separator();
-            ui.add_space(10.0);
+            ui.add_space(8.0);
 
             // ==========================================
             // FLASHBACK HERO SECTION (Flat High-Contrast)
@@ -337,14 +404,14 @@ impl eframe::App for MultiRecordingApp {
                 .fill(Color32::from_rgb(26, 26, 30))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(39, 39, 45)))
                 .rounding(Rounding::same(6.0))
-                .inner_margin(Margin::same(16.0))
+                .inner_margin(Margin::same(14.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label(RichText::new("RETROACTIVE FLASHBACK").size(12.0).color(Color32::from_rgb(161, 161, 170)).strong());
-                            ui.label(RichText::new("Continuously buffer gameplay & facecam feeds. Export synchronized clips retroactively.").size(13.0).color(Color32::from_rgb(212, 212, 216)));
+                            ui.label(RichText::new("Continuously buffer gameplay, facecam, and up to 5 audio tracks.").size(12.0).color(Color32::from_rgb(212, 212, 216)));
 
-                            ui.add_space(8.0);
+                            ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("Buffer Window:").color(Color32::from_rgb(161, 161, 170)));
                                 for &secs in &[60, 180, 300, 600, 900] {
@@ -363,7 +430,7 @@ impl eframe::App for MultiRecordingApp {
                                         Color32::from_rgb(45, 45, 52)
                                     };
 
-                                    if ui.add(egui::Button::new(RichText::new(label).strong().color(Color32::WHITE)).fill(btn_color).min_size(Vec2::new(45.0, 26.0))).clicked() {
+                                    if ui.add(egui::Button::new(RichText::new(label).strong().color(Color32::WHITE)).fill(btn_color).min_size(Vec2::new(42.0, 24.0))).clicked() {
                                         self.selected_flashback_secs = secs;
                                         self.config.buffer_duration_secs = secs;
                                         let _ = self.config.save_to_file(&self.config_path);
@@ -387,12 +454,12 @@ impl eframe::App for MultiRecordingApp {
 
                             let btn = egui::Button::new(
                                 RichText::new(flashback_btn_text)
-                                    .font(FontId::new(14.0, FontFamily::Proportional))
+                                    .font(FontId::new(13.0, FontFamily::Proportional))
                                     .strong()
                                     .color(Color32::WHITE),
                             )
                             .fill(btn_fill)
-                            .min_size(Vec2::new(220.0, 52.0));
+                            .min_size(Vec2::new(210.0, 48.0));
 
                             if ui.add(btn).clicked() && self.is_recording {
                                 self.trigger_flashback(self.selected_flashback_secs);
@@ -401,7 +468,7 @@ impl eframe::App for MultiRecordingApp {
                     });
                 });
 
-            ui.add_space(14.0);
+            ui.add_space(10.0);
 
             // ==========================================
             // STATUS & NOTIFICATION BANNER
@@ -418,20 +485,21 @@ impl eframe::App for MultiRecordingApp {
                         .fill(bg)
                         .stroke(Stroke::new(1.0_f32, border))
                         .rounding(Rounding::same(4.0))
-                        .inner_margin(Margin::symmetric(12.0, 8.0))
+                        .inner_margin(Margin::symmetric(12.0, 6.0))
                         .show(ui, |ui| {
                             ui.label(RichText::new(msg).color(text_color).strong());
                         });
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                 }
             }
 
-            // Pre-clone device options to avoid multiple borrows inside column closures
+            // Pre-clone device options to avoid multiple borrows
             let video_options: Vec<(usize, String)> = self.video_devices().into_iter().map(|d| (d.index, d.name.clone())).collect();
-            let audio_options: Vec<(usize, String)> = self.audio_devices().into_iter().map(|d| (d.index, d.name.clone())).collect();
+            let audio_device_items: Vec<Device> = self.audio_devices().into_iter().cloned().collect();
+            let has_loopback = self.has_loopback;
 
             // ==========================================
-            // DUAL-SOURCE CONFIGURATION CARDS
+            // DUAL-SOURCE VIDEO CARDS
             // ==========================================
             ui.columns(2, |columns| {
                 // Left Column: Stream 1 (Gameplay)
@@ -440,17 +508,17 @@ impl eframe::App for MultiRecordingApp {
                         .fill(Color32::from_rgb(28, 28, 32))
                         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 42, 48)))
                         .rounding(Rounding::same(6.0))
-                        .inner_margin(Margin::same(14.0))
+                        .inner_margin(Margin::same(12.0))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("🎮 SOURCE 1: GAMEPLAY").strong().color(Color32::from_rgb(244, 244, 245)));
+                                ui.label(RichText::new("🎮 VIDEO 1: GAMEPLAY").strong().color(Color32::from_rgb(244, 244, 245)));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.label(RichText::new("4K60 / VT").size(11.0).color(Color32::from_rgb(113, 113, 122)));
                                 });
                             });
-                            ui.add_space(6.0);
+                            ui.add_space(4.0);
 
-                            ui.label(RichText::new("Video Input (Capture Card / Screen)").size(11.0).color(Color32::from_rgb(161, 161, 170)));
+                            ui.label(RichText::new("Capture Card / Screen Input").size(11.0).color(Color32::from_rgb(161, 161, 170)));
                             let current_v_label = video_options
                                 .iter()
                                 .find(|(idx, _)| *idx == self.game_video_idx)
@@ -466,26 +534,9 @@ impl eframe::App for MultiRecordingApp {
                                     }
                                 });
 
-                            ui.add_space(8.0);
-                            ui.label(RichText::new("Audio Input (HDMI Game Audio)").size(11.0).color(Color32::from_rgb(161, 161, 170)));
-                            let current_a_label = audio_options
-                                .iter()
-                                .find(|(idx, _)| *idx == self.game_audio_idx)
-                                .map(|(idx, name)| format!("[{}] {}", idx, name))
-                                .unwrap_or_else(|| format!("Device {}", self.game_audio_idx));
-
-                            egui::ComboBox::from_id_source("game_a_combo")
-                                .width(ui.available_width())
-                                .selected_text(current_a_label)
-                                .show_ui(ui, |ui| {
-                                    for (idx, name) in &audio_options {
-                                        ui.selectable_value(&mut self.game_audio_idx, *idx, format!("[{}] {}", idx, name));
-                                    }
-                                });
-
-                            ui.add_space(8.0);
                             if let Some(mgr) = self.managers.first() {
                                 if let Ok(stats) = mgr.get_stats() {
+                                    ui.add_space(4.0);
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new("Buffer:").size(11.0).color(Color32::from_rgb(113, 113, 122)));
                                         ui.label(RichText::new(format!("{} chunks ({:.1} MB)", stats.segment_count, stats.total_size_mb)).size(11.0).color(Color32::from_rgb(16, 185, 129)).strong());
@@ -501,17 +552,17 @@ impl eframe::App for MultiRecordingApp {
                         .fill(Color32::from_rgb(28, 28, 32))
                         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 42, 48)))
                         .rounding(Rounding::same(6.0))
-                        .inner_margin(Margin::same(14.0))
+                        .inner_margin(Margin::same(12.0))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("📷 SOURCE 2: FACECAM").strong().color(Color32::from_rgb(244, 244, 245)));
+                                ui.label(RichText::new("📷 VIDEO 2: FACECAM").strong().color(Color32::from_rgb(244, 244, 245)));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.label(RichText::new("1080p60 / VT").size(11.0).color(Color32::from_rgb(113, 113, 122)));
                                 });
                             });
-                            ui.add_space(6.0);
+                            ui.add_space(4.0);
 
-                            ui.label(RichText::new("Video Input (Webcam / DSLR)").size(11.0).color(Color32::from_rgb(161, 161, 170)));
+                            ui.label(RichText::new("Webcam / Camera Input").size(11.0).color(Color32::from_rgb(161, 161, 170)));
                             let current_cam_v_label = video_options
                                 .iter()
                                 .find(|(idx, _)| *idx == self.cam_video_idx)
@@ -527,26 +578,9 @@ impl eframe::App for MultiRecordingApp {
                                     }
                                 });
 
-                            ui.add_space(8.0);
-                            ui.label(RichText::new("Audio Input (Microphone)").size(11.0).color(Color32::from_rgb(161, 161, 170)));
-                            let current_cam_a_label = audio_options
-                                .iter()
-                                .find(|(idx, _)| *idx == self.cam_audio_idx)
-                                .map(|(idx, name)| format!("[{}] {}", idx, name))
-                                .unwrap_or_else(|| format!("Device {}", self.cam_audio_idx));
-
-                            egui::ComboBox::from_id_source("cam_a_combo")
-                                .width(ui.available_width())
-                                .selected_text(current_cam_a_label)
-                                .show_ui(ui, |ui| {
-                                    for (idx, name) in &audio_options {
-                                        ui.selectable_value(&mut self.cam_audio_idx, *idx, format!("[{}] {}", idx, name));
-                                    }
-                                });
-
-                            ui.add_space(8.0);
                             if self.managers.len() > 1 {
                                 if let Ok(stats) = self.managers[1].get_stats() {
+                                    ui.add_space(4.0);
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new("Buffer:").size(11.0).color(Color32::from_rgb(113, 113, 122)));
                                         ui.label(RichText::new(format!("{} chunks ({:.1} MB)", stats.segment_count, stats.total_size_mb)).size(11.0).color(Color32::from_rgb(16, 185, 129)).strong());
@@ -557,7 +591,121 @@ impl eframe::App for MultiRecordingApp {
                 });
             });
 
-            ui.add_space(14.0);
+            ui.add_space(10.0);
+
+            // ==========================================
+            // MULTI-TRACK AUDIO MIXER (UP TO 5 TRACKS)
+            // ==========================================
+            egui::Frame::none()
+                .fill(Color32::from_rgb(28, 28, 32))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 42, 48)))
+                .rounding(Rounding::same(6.0))
+                .inner_margin(Margin::same(12.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("🎚 MULTI-TRACK AUDIO MIXER (UP TO 5 TRACKS)").strong().color(Color32::from_rgb(244, 244, 245)));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let enabled_count = self.config.audio_tracks.iter().filter(|t| t.enabled).count();
+                            ui.label(RichText::new(format!("{} of 5 Tracks Active", enabled_count)).size(11.0).color(Color32::from_rgb(16, 185, 129)).strong());
+                        });
+                    });
+                    ui.add_space(2.0);
+                    ui.label(RichText::new("Select inputs (Mics/Capture Cards) or outputs (Speakers/AirPods). Recorded as isolated streams in Premiere Pro.").size(11.0).color(Color32::from_rgb(161, 161, 170)));
+                    ui.add_space(8.0);
+
+                    for (i, track) in self.config.audio_tracks.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut track.enabled, format!("Track {}", i + 1));
+
+                            ui.add(egui::TextEdit::singleline(&mut track.name).desired_width(135.0));
+
+                            let cur_label = audio_device_items
+                                .iter()
+                                .find(|d| d.id == track.device_id)
+                                .map(|d| d.display_label(has_loopback))
+                                .unwrap_or_else(|| {
+                                    if track.device_id.starts_with("out:") {
+                                        format!("🔊 [Output] {}", track.device_id.trim_start_matches("out:"))
+                                    } else {
+                                        format!("🎙 [Mic {}] Device {}", track.device_index, track.device_index)
+                                    }
+                                });
+
+                            egui::ComboBox::from_id_source(format!("track_{}_combo", i))
+                                .width(ui.available_width() - 85.0)
+                                .selected_text(cur_label)
+                                .show_ui(ui, |ui| {
+                                    ui.label(RichText::new("── MICROPHONES & HARDWARE INPUTS ──").size(10.0).color(Color32::from_rgb(156, 163, 175)));
+                                    for dev in audio_device_items.iter().filter(|d| d.device_type == DeviceType::AudioInput) {
+                                        let is_sel = track.device_id == dev.id;
+                                        if ui.selectable_label(is_sel, dev.display_label(has_loopback)).clicked() {
+                                            track.device_id = dev.id.clone();
+                                            track.device_index = dev.av_index.unwrap_or(0);
+                                        }
+                                    }
+
+                                    ui.separator();
+                                    ui.label(RichText::new("── SYSTEM OUTPUTS (SPEAKERS & AIRPODS) ──").size(10.0).color(Color32::from_rgb(156, 163, 175)));
+                                    for dev in audio_device_items.iter().filter(|d| d.device_type == DeviceType::AudioOutput) {
+                                        let is_sel = track.device_id == dev.id;
+                                        if ui.selectable_label(is_sel, dev.display_label(has_loopback)).clicked() {
+                                            track.device_id = dev.id.clone();
+                                            track.device_index = dev.av_index.unwrap_or(0);
+                                        }
+                                    }
+                                });
+
+                            if track.enabled {
+                                ui.label(RichText::new("● ACTIVE").size(10.0).color(Color32::from_rgb(16, 185, 129)).strong());
+                            } else {
+                                ui.label(RichText::new("○ MUTED").size(10.0).color(Color32::from_rgb(113, 113, 122)));
+                            }
+                        });
+
+                        if i < 4 {
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+                        }
+                    }
+
+                    // Loopback and Output Guidance Banner
+                    ui.add_space(8.0);
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(22, 22, 26))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 38, 44)))
+                        .rounding(Rounding::same(4.0))
+                        .inner_margin(Margin::same(8.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if has_loopback {
+                                    ui.label(RichText::new("● Loopback Driver Active: BlackHole 2ch ready for speaker/AirPods capture").color(Color32::from_rgb(16, 185, 129)).size(11.0).strong());
+                                } else {
+                                    ui.label(RichText::new("💡 To Record Speakers / AirPods:").color(Color32::from_rgb(245, 158, 11)).size(11.0).strong());
+                                    ui.label(RichText::new("macOS requires BlackHole 2ch loopback driver.").color(Color32::from_rgb(156, 163, 175)).size(11.0));
+                                }
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let is_copied = self.copied_brew_cmd_until.map(|t| t.elapsed() < Duration::from_secs(3)).unwrap_or(false);
+                                    let brew_btn_text = if is_copied { "✔ Command Copied!" } else { "📋 Copy Brew Install" };
+                                    if ui.add(egui::Button::new(RichText::new(brew_btn_text).size(10.0))).clicked() {
+                                        ui.output_mut(|o| o.copied_text = "brew install --cask blackhole-2ch".to_string());
+                                        self.copied_brew_cmd_until = Some(Instant::now());
+                                    }
+
+                                    if ui.add(egui::Button::new(RichText::new("🎛 Audio MIDI Setup").size(10.0))).clicked() {
+                                        let _ = Command::new("open").arg("-a").arg("Audio MIDI Setup").spawn();
+                                    }
+
+                                    if ui.add(egui::Button::new(RichText::new("🔄 Refresh").size(10.0))).clicked() {
+                                        self.refresh_devices();
+                                    }
+                                });
+                            });
+                        });
+                });
+
+            ui.add_space(10.0);
 
             // ==========================================
             // RECENT EXPORTS & NLE TIME-SYNC READY
@@ -576,12 +724,12 @@ impl eframe::App for MultiRecordingApp {
                 .fill(Color32::from_rgb(22, 22, 25))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(36, 36, 40)))
                 .rounding(Rounding::same(6.0))
-                .inner_margin(Margin::same(12.0))
+                .inner_margin(Margin::same(10.0))
                 .show(ui, |ui| {
                     if self.recent_exports.is_empty() {
                         ui.label(RichText::new("No flashbacks saved yet in this session. Hit 'Space' or click the button above while recording.").color(Color32::from_rgb(113, 113, 122)));
                     } else {
-                        egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
                             for exp in &self.recent_exports {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(format!("⚡ {}", exp.timestamp)).strong().color(Color32::from_rgb(244, 244, 245)));
@@ -599,7 +747,7 @@ impl eframe::App for MultiRecordingApp {
                     }
                 });
 
-            ui.add_space(10.0);
+            ui.add_space(8.0);
 
             // ==========================================
             // LIVE STREAM DIAGNOSTICS & DEBUG DRAWER
@@ -625,7 +773,7 @@ impl eframe::App for MultiRecordingApp {
                             .rounding(Rounding::same(4.0))
                             .inner_margin(Margin::same(8.0))
                             .show(ui, |ui| {
-                                egui::ScrollArea::vertical().max_height(80.0).stick_to_bottom(true).show(ui, |ui| {
+                                egui::ScrollArea::vertical().max_height(70.0).stick_to_bottom(true).show(ui, |ui| {
                                     if logs.is_empty() {
                                         ui.label(RichText::new("Awaiting encoder output...").size(10.0).color(Color32::from_rgb(113, 113, 122)));
                                     } else {
@@ -635,7 +783,7 @@ impl eframe::App for MultiRecordingApp {
                                     }
                                 });
                             });
-                        ui.add_space(6.0);
+                        ui.add_space(4.0);
                     }
                 }
             });

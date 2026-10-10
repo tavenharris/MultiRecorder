@@ -13,8 +13,23 @@ pub struct Config {
     pub output_dir: PathBuf,
     /// Directory where the temporary rolling ring-buffer segments are stored
     pub buffer_dir: PathBuf,
-    /// Video/Audio source configurations
+    /// Video source configurations
     pub sources: Vec<SourceConfig>,
+    /// Up to 5 discrete audio tracks to record simultaneously
+    #[serde(default = "default_audio_tracks")]
+    pub audio_tracks: Vec<AudioTrackConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioTrackConfig {
+    pub enabled: bool,
+    /// Custom track title (written into MP4 track metadata for Premiere Pro timeline)
+    pub name: String,
+    /// AVFoundation audio device index (e.g. 0, 1, 2)
+    pub device_index: usize,
+    /// Unique device identifier (e.g. "in:0", "out:MacBook Pro Speakers")
+    #[serde(default)]
+    pub device_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,16 +38,49 @@ pub struct SourceConfig {
     pub name: String,
     /// AVFoundation video device index or name (e.g., "0", "1", or "Capture screen 0")
     pub video_device: String,
-    /// Optional AVFoundation audio device index (e.g., "0" for mic, "1" for capture card)
-    pub audio_device: Option<String>,
-    /// Target resolution (e.g., "3840x2160", "1920x1080", or empty for native)
+    /// Target resolution (e.g., "3840x2160", "1920x1080", or None for native)
     pub resolution: Option<String>,
     /// Frame rate (e.g., 60)
     pub fps: Option<u32>,
     /// Target video bitrate (e.g., "50M" for 4K, "15M" for 1080p)
     pub video_bitrate: String,
-    /// Video encoder to use (e.g., "h264_videotoolbox", "hevc_videotoolbox", "prores_videotoolbox")
+    /// Video encoder to use (e.g., "h264_videotoolbox", "hevc_videotoolbox")
     pub encoder: String,
+}
+
+pub fn default_audio_tracks() -> Vec<AudioTrackConfig> {
+    vec![
+        AudioTrackConfig {
+            enabled: true,
+            name: "Game Audio".to_string(),
+            device_index: 0,
+            device_id: "in:0".to_string(),
+        },
+        AudioTrackConfig {
+            enabled: true,
+            name: "Microphone".to_string(),
+            device_index: 0,
+            device_id: "in:0".to_string(),
+        },
+        AudioTrackConfig {
+            enabled: false,
+            name: "Discord / Chat".to_string(),
+            device_index: 0,
+            device_id: "in:0".to_string(),
+        },
+        AudioTrackConfig {
+            enabled: false,
+            name: "Desktop / Speakers".to_string(),
+            device_index: 0,
+            device_id: "out:MacBook Pro Speakers".to_string(),
+        },
+        AudioTrackConfig {
+            enabled: false,
+            name: "AirPods / Aux".to_string(),
+            device_index: 0,
+            device_id: "out:AirPods".to_string(),
+        },
+    ]
 }
 
 impl Default for Config {
@@ -48,14 +96,22 @@ impl Default for Config {
             sources: vec![
                 SourceConfig {
                     name: "gameplay".to_string(),
-                    video_device: "0".to_string(), // capture screen or capture card
-                    audio_device: Some("0".to_string()),
+                    video_device: "0".to_string(),
                     resolution: Some("1920x1080".to_string()),
                     fps: Some(60),
                     video_bitrate: "40M".to_string(),
                     encoder: "h264_videotoolbox".to_string(),
                 },
+                SourceConfig {
+                    name: "facecam".to_string(),
+                    video_device: "0".to_string(),
+                    resolution: Some("1920x1080".to_string()),
+                    fps: Some(60),
+                    video_bitrate: "15M".to_string(),
+                    encoder: "h264_videotoolbox".to_string(),
+                },
             ],
+            audio_tracks: default_audio_tracks(),
         }
     }
 }

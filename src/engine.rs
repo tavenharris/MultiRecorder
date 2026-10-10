@@ -49,13 +49,24 @@ impl RecordingEngine {
 
         for src in &self.config.sources {
             println!(
-                "  • [{}] Video: Device {} | Audio: {:?} | Encoder: {} ({})",
+                "  • [{}] Video: Device {} | Encoder: {} ({})",
                 src.name.yellow().bold(),
                 src.video_device,
-                src.audio_device,
                 src.encoder,
                 src.video_bitrate
             );
+        }
+
+        println!("{}", "Audio Tracks (Multi-Track):".white().bold());
+        for (i, track) in self.config.audio_tracks.iter().enumerate() {
+            if track.enabled {
+                println!(
+                    "  • Track {}: {} (Audio Device {})",
+                    i + 1,
+                    track.name.green().bold(),
+                    track.device_index
+                );
+            }
         }
 
         println!("{}", "────────────────────────────────────────────────────────────────".cyan());
@@ -67,7 +78,11 @@ impl RecordingEngine {
 
         // Spawn recorders
         for src in self.config.sources.clone() {
-            let mut recorder = StreamRecorder::new(src, self.config.segment_duration_secs);
+            let mut recorder = StreamRecorder::new(
+                src,
+                self.config.audio_tracks.clone(),
+                self.config.segment_duration_secs,
+            );
             recorder.start(&self.config.buffer_dir)?;
             self.recorders.push(recorder);
         }

@@ -73,8 +73,8 @@ fn main() -> Result<()> {
         Commands::Gui { config: config_path } => {
             let native_options = eframe::NativeOptions {
                 viewport: eframe::egui::ViewportBuilder::default()
-                    .with_inner_size([840.0, 620.0])
-                    .with_min_inner_size([740.0, 520.0])
+                    .with_inner_size([900.0, 760.0])
+                    .with_min_inner_size([800.0, 600.0])
                     .with_title("MultiRecording Pro"),
                 ..Default::default()
             };
@@ -95,7 +95,8 @@ fn main() -> Result<()> {
             let devices = DeviceManager::list_devices()?;
 
             let video_devs: Vec<_> = devices.iter().filter(|d| d.device_type == DeviceType::Video).collect();
-            let audio_devs: Vec<_> = devices.iter().filter(|d| d.device_type == DeviceType::Audio).collect();
+            let audio_in_devs: Vec<_> = devices.iter().filter(|d| d.device_type == DeviceType::AudioInput).collect();
+            let audio_out_devs: Vec<_> = devices.iter().filter(|d| d.device_type == DeviceType::AudioOutput).collect();
 
             println!("\n{}", "📹 VIDEO SOURCES (Capture Cards, Cameras, Screens):".yellow().bold());
             if video_devs.is_empty() {
@@ -106,15 +107,24 @@ fn main() -> Result<()> {
                 }
             }
 
-            println!("\n{}", "🎙 AUDIO SOURCES (Mics, HDMI Audio, Interfaces):".yellow().bold());
-            if audio_devs.is_empty() {
-                println!("  No audio devices found.");
+            println!("\n{}", "🎙 AUDIO INPUTS (Mics, HDMI Audio, Interfaces):".yellow().bold());
+            if audio_in_devs.is_empty() {
+                println!("  No audio inputs found.");
             } else {
-                for dev in audio_devs {
+                for dev in audio_in_devs {
                     println!("  [{}] {}", dev.index.to_string().cyan().bold(), dev.name);
                 }
             }
-            println!("\nTip: Use these device indices in your `config.toml`.");
+
+            println!("\n{}", "🔊 AUDIO OUTPUTS (Speakers, AirPods, Headphones):".yellow().bold());
+            if audio_out_devs.is_empty() {
+                println!("  No audio outputs found.");
+            } else {
+                for dev in audio_out_devs {
+                    println!("  • {}", dev.name.cyan().bold());
+                }
+            }
+            println!("\nTip: To route audio outputs (Speakers/AirPods) into a recording track, use BlackHole loopback or Multi-Output Device.");
         }
 
         Commands::Init { path } => {
