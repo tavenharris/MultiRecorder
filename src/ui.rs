@@ -8,6 +8,7 @@ use crate::ring_buffer::RingBufferManager;
 use eframe::egui::{self, Color32, FontFamily, FontId, Margin, RichText, Rounding, Stroke, Vec2};
 use std::fs;
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -55,6 +56,7 @@ pub struct MultiRecordingApp {
     // Selected video device indices
     game_video_idx: usize,
     cam_video_idx: usize,
+    #[allow(dead_code)]
     copied_brew_cmd_until: Option<Instant>,
 }
 
@@ -590,7 +592,8 @@ impl MultiRecordingApp {
             return;
         }
 
-        // Pre-validate audio tracks
+        // Pre-validate audio tracks on macOS where BlackHole is required for AudioOutput capture
+        #[cfg(target_os = "macos")]
         for track in &self.config.audio_tracks {
             if track.enabled {
                 if let Some(dev) = self.discovered_devices.iter().find(|d| d.id == track.device_id) {
@@ -1611,19 +1614,27 @@ impl MultiRecordingApp {
 
                     // --- Row 6: Hardware & System Audio Driver ---
                     ui.horizontal(|ui| {
-                        if self.has_loopback {
-                            ui.label(RichText::new("● BlackHole Loopback Driver: Installed & Active").color(Color32::from_rgb(16, 185, 129)).size(11.0));
-                        } else {
-                            ui.label(RichText::new("○ BlackHole Loopback: Not installed. Required for Speaker/AirPods recording.").color(Color32::from_rgb(245, 158, 11)).size(11.0));
-                            let is_copied = self.copied_brew_cmd_until.map(|t| t.elapsed() < Duration::from_secs(3)).unwrap_or(false);
-                            let brew_text = if is_copied { "✔ Copied!" } else { "📋 Copy Brew Install" };
-                            if ui.add(egui::Button::new(RichText::new(brew_text).size(10.0))).clicked() {
-                                ui.output_mut(|o| o.copied_text = "brew install --cask blackhole-2ch".to_string());
-                                self.copied_brew_cmd_until = Some(Instant::now());
+                        #[cfg(target_os = "macos")]
+                        {
+                            if self.has_loopback {
+                                ui.label(RichText::new("● BlackHole Loopback Driver: Installed & Active").color(Color32::from_rgb(16, 185, 129)).size(11.0));
+                            } else {
+                                ui.label(RichText::new("○ BlackHole Loopback: Not installed. Required for Speaker/AirPods recording.").color(Color32::from_rgb(245, 158, 11)).size(11.0));
+                                let is_copied = self.copied_brew_cmd_until.map(|t| t.elapsed() < Duration::from_secs(3)).unwrap_or(false);
+                                let brew_text = if is_copied { "✔ Copied!" } else { "📋 Copy Brew Install" };
+                                if ui.add(egui::Button::new(RichText::new(brew_text).size(10.0))).clicked() {
+                                    ui.output_mut(|o| o.copied_text = "brew install --cask blackhole-2ch".to_string());
+                                    self.copied_brew_cmd_until = Some(Instant::now());
+                                }
+                                if ui.add(egui::Button::new(RichText::new("🎛 Audio MIDI Setup").size(10.0))).clicked() {
+                                    let _ = Command::new("open").arg("-a").arg("Audio MIDI Setup").spawn();
+                                }
                             }
-                            if ui.add(egui::Button::new(RichText::new("🎛 Audio MIDI Setup").size(10.0))).clicked() {
-                                let _ = Command::new("open").arg("-a").arg("Audio MIDI Setup").spawn();
-                            }
+                        }
+
+                        #[cfg(target_os = "windows")]
+                        {
+                            ui.label(RichText::new("● Windows DirectShow & CoreAudio Capture: Active").color(Color32::from_rgb(16, 185, 129)).size(11.0));
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

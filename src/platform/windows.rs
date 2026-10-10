@@ -174,14 +174,55 @@ impl WindowsPlatform {
             });
         }
 
-        // 3. Audio Outputs: Query CPAL for real endpoints (Monitors, Speakers, Headphones)
         let host = cpal::default_host();
         let default_out_name = host
             .default_output_device()
             .and_then(|d| d.description().ok())
             .map(|desc| desc.name().to_string());
 
-        let mut out_idx = 0;
+        // 3. Audio Inputs: DirectShow microphone / input devices + CPAL inputs
+        let mut in_idx = 0;
+        let mut added_inputs = Vec::new();
+
+        for a_name in dshow_audios {
+            if !added_inputs.contains(&a_name) {
+                added_inputs.push(a_name.clone());
+                devices.push(Device {
+                    id: a_name.clone(),
+                    index: in_idx,
+                    name: a_name,
+                    device_type: DeviceType::AudioInput,
+                    av_index: None,
+                    resolution: None,
+                    fps: None,
+                });
+                in_idx += 1;
+            }
+        }
+
+        if let Ok(inputs) = host.input_devices() {
+            for dev in inputs {
+                if let Ok(desc) = dev.description() {
+                    let name = desc.name().to_string();
+                    if !added_inputs.contains(&name) {
+                        added_inputs.push(name.clone());
+                        devices.push(Device {
+                            id: name.clone(),
+                            index: in_idx,
+                            name,
+                            device_type: DeviceType::AudioInput,
+                            av_index: None,
+                            resolution: None,
+                            fps: None,
+                        });
+                        in_idx += 1;
+                    }
+                }
+            }
+        }
+
+        // 4. Audio Outputs: Query CPAL for real endpoints (Monitors, Speakers, Headphones)
+        let mut out_idx = in_idx;
         let mut added_outputs = Vec::new();
 
         if let Ok(outputs) = host.output_devices() {
@@ -224,47 +265,6 @@ impl WindowsPlatform {
             resolution: None,
             fps: None,
         });
-
-        // 4. Audio Inputs: DirectShow microphone / input devices + CPAL inputs
-        let mut in_idx = 0;
-        let mut added_inputs = Vec::new();
-
-        for a_name in dshow_audios {
-            if !added_inputs.contains(&a_name) {
-                added_inputs.push(a_name.clone());
-                devices.push(Device {
-                    id: a_name.clone(),
-                    index: in_idx,
-                    name: a_name,
-                    device_type: DeviceType::AudioInput,
-                    av_index: None,
-                    resolution: None,
-                    fps: None,
-                });
-                in_idx += 1;
-            }
-        }
-
-        if let Ok(inputs) = host.input_devices() {
-            for dev in inputs {
-                if let Ok(desc) = dev.description() {
-                    let name = desc.name().to_string();
-                    if !added_inputs.contains(&name) {
-                        added_inputs.push(name.clone());
-                        devices.push(Device {
-                            id: name.clone(),
-                            index: in_idx,
-                            name,
-                            device_type: DeviceType::AudioInput,
-                            av_index: None,
-                            resolution: None,
-                            fps: None,
-                        });
-                        in_idx += 1;
-                    }
-                }
-            }
-        }
 
         Ok(devices)
     }
@@ -323,10 +323,10 @@ impl WindowsPlatform {
                 format!("video={}", video_device)
             };
             vec![
+                "-rtbufsize".to_string(),
+                "128M".to_string(),
                 "-f".to_string(),
                 "dshow".to_string(),
-                "-framerate".to_string(),
-                "15".to_string(),
                 "-i".to_string(),
                 dev_arg,
                 "-an".to_string(),
@@ -364,10 +364,10 @@ impl WindowsPlatform {
                 format!("video={}", video_device)
             };
             args.extend([
+                "-rtbufsize".to_string(),
+                "256M".to_string(),
                 "-f".to_string(),
                 "dshow".to_string(),
-                "-framerate".to_string(),
-                in_fps.to_string(),
                 "-i".to_string(),
                 dev_arg,
             ]);
@@ -379,9 +379,7 @@ impl WindowsPlatform {
             let is_wasapi = id == "wasapi"
                 || id == "default"
                 || id.starts_with("out:")
-                || id.to_lowercase().contains("wasapi")
-                || track.name.to_lowercase().contains("desktop")
-                || track.name.to_lowercase().contains("speaker");
+                || id.to_lowercase().contains("wasapi");
 
             if is_wasapi {
                 args.extend([
@@ -636,7 +634,12 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
                 let boost = (max_abs * 2.5).clamp(0.0, 1.0);
                 peak_clone.store((boost * 10000.0) as u32, Ordering::Relaxed);
             },
-            |err| eprintln!("[MultiRecording] Audio monitor stream error: {:?}", err),
+            |err| {
+                let err_str = format!("{:?}", err);
+                if !err_str.contains("Xrun") {
+                    eprintln!("[MultiRecording] Audio monitor stream error: {}", err_str);
+                }
+            },
             None,
         ),
         cpal::SampleFormat::I16 => dev.build_input_stream(
@@ -652,7 +655,12 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
                 let boost = (max_abs * 2.5).clamp(0.0, 1.0);
                 peak_clone.store((boost * 10000.0) as u32, Ordering::Relaxed);
             },
-            |err| eprintln!("[MultiRecording] Audio monitor stream error: {:?}", err),
+            |err| {
+                let err_str = format!("{:?}", err);
+                if !err_str.contains("Xrun") {
+                    eprintln!("[MultiRecording] Audio monitor stream error: {}", err_str);
+                }
+            },
             None,
         ),
         cpal::SampleFormat::U16 => dev.build_input_stream(
@@ -668,7 +676,12 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
                 let boost = (max_abs * 2.5).clamp(0.0, 1.0);
                 peak_clone.store((boost * 10000.0) as u32, Ordering::Relaxed);
             },
-            |err| eprintln!("[MultiRecording] Audio monitor stream error: {:?}", err),
+            |err| {
+                let err_str = format!("{:?}", err);
+                if !err_str.contains("Xrun") {
+                    eprintln!("[MultiRecording] Audio monitor stream error: {}", err_str);
+                }
+            },
             None,
         ),
         _ => return None,
@@ -821,10 +834,10 @@ mod tests {
         assert_eq!(
             cam_args,
             vec![
+                "-rtbufsize",
+                "128M",
                 "-f",
                 "dshow",
-                "-framerate",
-                "15",
                 "-i",
                 "video=Integrated Camera",
                 "-an"
