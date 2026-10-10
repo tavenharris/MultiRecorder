@@ -164,6 +164,26 @@ impl MacOSPlatform {
             ("libx264", "libx264 (CPU)"),
         ]
     }
+
+    pub fn validate_audio_tracks(
+        &self,
+        tracks: &[AudioTrackConfig],
+        devices: &[Device],
+    ) -> Result<(), String> {
+        for track in tracks {
+            if track.enabled {
+                if let Some(dev) = devices.iter().find(|d| d.id == track.device_id) {
+                    if dev.device_type == DeviceType::AudioOutput && dev.av_index.is_none() {
+                        return Err(format!(
+                            "⚠️ Track '{}' is set to '{}' (Audio Output). On macOS, capturing speaker/AirPods audio requires BlackHole 2ch loopback.",
+                            track.name, dev.name
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl CapturePlatform for MacOSPlatform {
@@ -206,6 +226,14 @@ impl CapturePlatform for MacOSPlatform {
 
     fn available_encoders(&self) -> &'static [(&'static str, &'static str)] {
         self.available_encoders()
+    }
+
+    fn validate_audio_tracks(
+        &self,
+        tracks: &[AudioTrackConfig],
+        devices: &[Device],
+    ) -> Result<(), String> {
+        self.validate_audio_tracks(tracks, devices)
     }
 }
 

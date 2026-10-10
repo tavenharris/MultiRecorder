@@ -167,10 +167,15 @@ pub trait CapturePlatform: Send + Sync {
     fn audio_input_index(&self, track_idx: usize) -> usize;
     fn build_audio_monitor_args(&self, audio_device_identifier: &str) -> Vec<String>;
     fn default_video_encoder(&self) -> &'static str;
-    fn available_encoders(&self) -> &'static [&'static str];
+    fn available_encoders(&self) -> &'static [(&'static str, &'static str)];
     fn has_loopback_support(&self, devices: &[Device]) -> bool;
+    fn validate_audio_tracks(
+        &self,
+        tracks: &[crate::config::AudioTrackConfig],
+        devices: &[Device],
+    ) -> Result<(), String>;
 }
 ```
 
-The active implementation is exposed as `CurrentPlatform` using conditional compilation (`#[cfg(target_os = "macos")]` and `#[cfg(target_os = "windows")]`), providing a clean, non-invasive integration across `devices.rs`, `recorder.rs`, `engine.rs`, and `ui.rs`.
+The active implementation is exposed as `CurrentPlatform` using conditional compilation (`#[cfg(target_os = "macos")]` and `#[cfg(target_os = "windows")]`), providing a clean, non-invasive integration across `devices.rs`, `recorder.rs`, `engine.rs`, and `ui.rs`. Cross-platform operating system actions (file manager reveal, text editor launch, folder picker dialog, and system audio control panel launch) are provided via platform helpers (`reveal_path`, `reveal_file`, `pick_folder`, `open_system_audio_control`).
 

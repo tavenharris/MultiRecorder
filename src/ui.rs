@@ -8,8 +8,6 @@ use crate::ring_buffer::RingBufferManager;
 use eframe::egui::{self, Color32, FontFamily, FontId, Margin, RichText, Rounding, Stroke, Vec2};
 use std::fs;
 use std::path::PathBuf;
-#[cfg(target_os = "macos")]
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -592,24 +590,13 @@ impl MultiRecordingApp {
             return;
         }
 
-        // Pre-validate audio tracks on macOS where BlackHole is required for AudioOutput capture
-        #[cfg(target_os = "macos")]
-        for track in &self.config.audio_tracks {
-            if track.enabled {
-                if let Some(dev) = self.discovered_devices.iter().find(|d| d.id == track.device_id) {
-                    if dev.device_type == DeviceType::AudioOutput && dev.av_index.is_none() {
-                        self.status_message = Some((
-                            format!(
-                                "⚠️ Track '{}' is set to '{}' (Audio Output). On macOS, capturing speaker/AirPods audio requires BlackHole 2ch loopback.",
-                                track.name, dev.name
-                            ),
-                            Instant::now(),
-                            true,
-                        ));
-                        return;
-                    }
-                }
-            }
+        // Pre-validate audio tracks via HAL
+        if let Err(warning) = crate::platform::CurrentPlatform.validate_audio_tracks(
+            &self.config.audio_tracks,
+            &self.discovered_devices,
+        ) {
+            self.status_message = Some((warning, Instant::now(), true));
+            return;
         }
 
         self.stop_preview_streams();
@@ -1627,7 +1614,7 @@ impl MultiRecordingApp {
                                     self.copied_brew_cmd_until = Some(Instant::now());
                                 }
                                 if ui.add(egui::Button::new(RichText::new("🎛 Audio MIDI Setup").size(10.0))).clicked() {
-                                    let _ = Command::new("open").arg("-a").arg("Audio MIDI Setup").spawn();
+                                    crate::platform::open_system_audio_control();
                                 }
                             }
                         }
@@ -1635,6 +1622,9 @@ impl MultiRecordingApp {
                         #[cfg(target_os = "windows")]
                         {
                             ui.label(RichText::new("● Windows DirectShow & CoreAudio Capture: Active").color(Color32::from_rgb(16, 185, 129)).size(11.0));
+                            if ui.add(egui::Button::new(RichText::new("🎛 Sound Control Panel").size(10.0))).clicked() {
+                                crate::platform::open_system_audio_control();
+                            }
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

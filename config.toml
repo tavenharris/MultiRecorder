@@ -17,6 +17,7 @@ encoder = "h264_nvenc"
 [[sources]]
 name = "facecam"
 video_device = "0"
+resolution = "1280x720"
 fps = 30
 video_bitrate = "8M"
 encoder = "h264_nvenc"

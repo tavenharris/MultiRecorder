@@ -36,6 +36,17 @@ pub trait CapturePlatform: Send + Sync {
 
     /// List of available encoders and their user-friendly labels for UI
     fn available_encoders(&self) -> &'static [(&'static str, &'static str)];
+
+    /// Validates audio tracks before starting the recording engine.
+    /// Returns Err(warning_message) if an audio configuration issue is detected on the current platform.
+    fn validate_audio_tracks(
+        &self,
+        tracks: &[crate::config::AudioTrackConfig],
+        devices: &[Device],
+    ) -> Result<(), String> {
+        let _ = (tracks, devices);
+        Ok(())
+    }
 }
 
 pub mod macos;
@@ -152,3 +163,20 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     }
     None
 }
+
+/// Cross-platform helper to launch system audio configuration utility
+pub fn open_system_audio_control() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg("-a").arg("Audio MIDI Setup").spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("control").arg("mmsys.cpl,,sounds").spawn();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = std::process::Command::new("pavucontrol").spawn();
+    }
+}
+

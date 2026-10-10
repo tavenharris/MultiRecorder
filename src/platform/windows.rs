@@ -480,6 +480,14 @@ impl WindowsPlatform {
             ("libx264", "libx264 (CPU)"),
         ]
     }
+
+    pub fn validate_audio_tracks(
+        &self,
+        _tracks: &[AudioTrackConfig],
+        _devices: &[Device],
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl CapturePlatform for WindowsPlatform {
@@ -522,6 +530,14 @@ impl CapturePlatform for WindowsPlatform {
 
     fn available_encoders(&self) -> &'static [(&'static str, &'static str)] {
         self.available_encoders()
+    }
+
+    fn validate_audio_tracks(
+        &self,
+        _tracks: &[AudioTrackConfig],
+        _devices: &[Device],
+    ) -> Result<(), String> {
+        Ok(())
     }
 }
 

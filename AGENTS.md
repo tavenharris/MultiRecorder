@@ -77,7 +77,7 @@ When modifying or refactoring this project, future agents **must respect these h
 
 ### C. Desktop / Loopback Audio Capture
 - **macOS:** AVFoundation only records *input* devices (microphones, capture cards). Capturing desktop/speaker audio requires the virtual loopback driver **BlackHole 2ch** (or an Apple Multi-Output Device).
-- **Windows:** FFmpeg natively captures desktop audio using WASAPI loopback (`-f wasapi -i default`) without requiring third-party drivers.
+- **Windows:** Real-time audio VU monitoring captures native CoreAudio WASAPI loopback directly in-process via `cpal` (`start_cpal_monitor`) without external subprocesses or third-party drivers. Hardware microphones and capture card audio are captured via DirectShow (`-f dshow -i audio="..."`).
 
 ### D. Stdio Pipe Stall & Process Deadlock
 - **The Quirk:** When spawning FFmpeg subprocesses with piped `stdout` or `stderr`, OS pipes have a default buffer size (e.g. 64KB). If FFmpeg writes logs or frames to a pipe and the parent process does not continuously read from it, the pipe buffer fills up and FFmpeg freezes indefinitely after 2–3 seconds.
@@ -104,6 +104,22 @@ When modifying or refactoring this project, future agents **must respect these h
 
 ### H. Settings UI is a Popup Window
 - The settings drawer is rendered via `egui::Window::new("⚙ Preferences & Recording Settings")` as an independent floating popup modal, toggled by the top bar `[⚙ settings]` button.
+
+### I. DirectShow Input Framerate & Buffer Sizing on Windows
+- **The Quirk:** DirectShow physical capture cards (e.g. Elgato Game Capture HD60 Pro) and virtual cameras (e.g. OBS Virtual Camera) reject custom framerate flags like `-framerate 15` at the driver filter negotiation level with:
+  `[in#0 @ ...] Could not set video options / Error opening input: I/O error`.
+  Furthermore, DirectShow's default internal packet queue (3MB) quickly overflows when capturing uncompressed 1080p60 frames.
+- **The Invariant:**
+  1. Standby `build_preview_input_args` for DirectShow **must omit `-framerate 15`** on input and include `-rtbufsize 128M`. Frame rate conversion to 15fps is performed downstream by FFmpeg's video filter (`-vf scale=320:180:...,fps=15`).
+  2. Recording `build_recording_input_args` for DirectShow **must include `-rtbufsize 256M`** to guarantee zero dropped frames on high-bandwidth capture cards.
+
+### J. Platform-Specific Audio Pre-Validation
+- **The Quirk:** macOS requires `BlackHole 2ch` to capture audio from `AudioOutput` endpoints, whereas Windows natively captures speaker/headphone endpoints via WASAPI/CoreAudio without virtual drivers.
+- **The Invariant:** Never scatter platform checks (e.g. `#[cfg(target_os = "macos")]`) inside `src/ui.rs` or business logic. All audio pre-flight validation must be encapsulated inside `CapturePlatform::validate_audio_tracks(&tracks, &devices)`.
+
+### K. In-Process Audio Monitoring & CPAL Xrun Handling
+- **The Quirk:** On Windows, `AudioTrackMonitor` uses `cpal` to tap CoreAudio WASAPI loopback directly in-process. In WASAPI loopback, `cpal::StreamError::ErrorKind::Xrun` (buffer underrun/overrun) naturally triggers during stream pause, volume changes, or silence intervals.
+- **The Invariant:** `start_cpal_monitor` error callbacks must suppress `Xrun` errors to prevent flooding stderr/stdout, while continuing to log all actionable system audio errors.
 
 ---
 
