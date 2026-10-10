@@ -76,11 +76,16 @@ impl RecordingEngine {
         println!("  [{}] : Graceful exit / stop recording", "Q / Esc".red().bold());
         println!("{}", "────────────────────────────────────────────────────────────────".cyan());
 
-        // Spawn recorders
-        for src in self.config.sources.clone() {
+        // Spawn recorders (primary stream captures audio tracks, secondary streams capture video-only)
+        for (i, src) in self.config.sources.clone().into_iter().enumerate() {
+            let tracks = if i == 0 {
+                self.config.audio_tracks.clone()
+            } else {
+                vec![]
+            };
             let mut recorder = StreamRecorder::new(
                 src,
-                self.config.audio_tracks.clone(),
+                tracks,
                 self.config.segment_duration_secs,
             );
             recorder.start(&self.config.buffer_dir)?;

@@ -5,7 +5,7 @@ buffer_dir = "/tmp/multirecording_buffer"
 
 [[sources]]
 name = "gameplay"
-video_device = "0"
+video_device = "3"
 resolution = "1920x1080"
 fps = 60
 video_bitrate = "40M"
@@ -19,28 +19,32 @@ fps = 60
 video_bitrate = "15M"
 encoder = "h264_videotoolbox"
 
-# Up to 5 Discrete Multi-Track Audio Sources
 [[audio_tracks]]
 enabled = true
-name = "Game Audio"
+name = "MacBook Pro Microphone"
 device_index = 0
+device_id = "in:0"
 
 [[audio_tracks]]
-enabled = true
+enabled = false
 name = "Microphone"
 device_index = 0
+device_id = "none"
 
 [[audio_tracks]]
 enabled = false
 name = "Discord / Chat"
 device_index = 0
+device_id = "none"
 
 [[audio_tracks]]
 enabled = false
 name = "Desktop / Music"
 device_index = 0
+device_id = "none"
 
 [[audio_tracks]]
 enabled = false
 name = "Aux / Soundboard"
 device_index = 0
+device_id = "none"

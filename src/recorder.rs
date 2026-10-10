@@ -8,6 +8,80 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+pub struct PreviewStream {
+    video_device: String,
+    child: Option<Child>,
+    latest_frame: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+impl PreviewStream {
+    pub fn new(video_device: String) -> Self {
+        Self {
+            video_device,
+            child: None,
+            latest_frame: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn start(&mut self) -> Result<()> {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args([
+            "-y",
+            "-f", "avfoundation",
+            "-framerate", "30",
+            "-i", &format!("{}:none", self.video_device),
+            "-vf", "scale=320:180,fps=15",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "pipe:1",
+        ]);
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::null());
+
+        let mut child = cmd.spawn().with_context(|| {
+            format!("Failed to spawn preview ffmpeg for device {}", self.video_device)
+        })?;
+
+        if let Some(stdout) = child.stdout.take() {
+            let frame_arc = Arc::clone(&self.latest_frame);
+            thread::spawn(move || {
+                use std::io::Read;
+                let mut reader = BufReader::with_capacity(320 * 180 * 4 * 2, stdout);
+                let mut buf = vec![0u8; 320 * 180 * 4];
+                while reader.read_exact(&mut buf).is_ok() {
+                    if let Ok(mut lock) = frame_arc.lock() {
+                        *lock = Some(buf.clone());
+                    }
+                }
+            });
+        }
+
+        self.child = Some(child);
+        Ok(())
+    }
+
+    pub fn get_latest_frame(&self) -> Option<Vec<u8>> {
+        self.latest_frame.lock().ok().and_then(|f| f.clone())
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(b"q\n");
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for PreviewStream {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 pub struct StreamRecorder {
     source: SourceConfig,
     audio_tracks: Vec<AudioTrackConfig>,
@@ -15,6 +89,7 @@ pub struct StreamRecorder {
     segment_duration_secs: u64,
     recent_logs: Arc<Mutex<VecDeque<String>>>,
     log_file_path: PathBuf,
+    latest_frame: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl StreamRecorder {
@@ -34,6 +109,7 @@ impl StreamRecorder {
             segment_duration_secs,
             recent_logs: Arc::new(Mutex::new(VecDeque::with_capacity(50))),
             log_file_path,
+            latest_frame: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -49,6 +125,10 @@ impl StreamRecorder {
         }
     }
 
+    pub fn get_latest_frame(&self) -> Option<Vec<u8>> {
+        self.latest_frame.lock().ok().and_then(|f| f.clone())
+    }
+
     pub fn log_file_path(&self) -> &Path {
         &self.log_file_path
     }
@@ -59,8 +139,12 @@ impl StreamRecorder {
             .to_string_lossy()
             .to_string();
 
-        let fps = self.source.fps.unwrap_or(30);
+        let fps = self.source.fps.unwrap_or(60);
         let gop_size = fps * self.segment_duration_secs as u32;
+
+        let is_camera = self.source.name.to_lowercase().contains("cam")
+            || self.source.name.to_lowercase().contains("face");
+        let in_fps = if is_camera { 30 } else { fps.min(60) };
 
         let enabled_tracks: Vec<&AudioTrackConfig> = self
             .audio_tracks
@@ -72,10 +156,13 @@ impl StreamRecorder {
         cmd.args(["-y"]);
 
         // Input 0: Video device + first enabled audio device (if any)
+        // Pass exact hardware-supported framerate (30 for webcams, up to 60 for capture cards/screen)
         if let Some(first_track) = enabled_tracks.first() {
             cmd.args([
                 "-f",
                 "avfoundation",
+                "-framerate",
+                &in_fps.to_string(),
                 "-i",
                 &format!("{}:{}", self.source.video_device, first_track.device_index),
             ]);
@@ -83,6 +170,8 @@ impl StreamRecorder {
             cmd.args([
                 "-f",
                 "avfoundation",
+                "-framerate",
+                &in_fps.to_string(),
                 "-i",
                 &format!("{}:none", self.source.video_device),
             ]);
@@ -98,8 +187,21 @@ impl StreamRecorder {
             ]);
         }
 
-        // Map video from input 0
-        cmd.args(["-map", "0:v"]);
+        // Filter complex: split video into [rec] and [prev]
+        let filter_str = if let Some(res) = &self.source.resolution {
+            if let Some((w, h)) = res.split_once('x') {
+                format!("[0:v]split=2[rec_raw][prev_raw];[rec_raw]scale={}:{},fps={}[rec];[prev_raw]scale=320:180,fps=15[prev]", w, h, fps)
+            } else {
+                format!("[0:v]split=2[rec_raw][prev_raw];[rec_raw]fps={}[rec];[prev_raw]scale=320:180,fps=15[prev]", fps)
+            }
+        } else {
+            format!("[0:v]split=2[rec_raw][prev_raw];[rec_raw]fps={}[rec];[prev_raw]scale=320:180,fps=15[prev]", fps)
+        };
+
+        cmd.args(["-filter_complex", &filter_str]);
+
+        // Output 0: Segments
+        cmd.args(["-map", "[rec]"]);
 
         // Map each audio stream with its dedicated track title metadata
         for (i, track) in enabled_tracks.iter().enumerate() {
@@ -113,13 +215,6 @@ impl StreamRecorder {
         // Output framerate & GOP boundary alignment (Crucial for segmenting)
         cmd.args(["-r", &fps.to_string()]);
         cmd.args(["-g", &gop_size.to_string()]);
-
-        // Optional scaling filter if resolution requested
-        if let Some(res) = &self.source.resolution {
-            if let Some((w, h)) = res.split_once('x') {
-                cmd.args(["-vf", &format!("scale={}:{}", w, h)]);
-            }
-        }
 
         // Video encoder settings
         cmd.args([
@@ -151,9 +246,17 @@ impl StreamRecorder {
             &segment_pattern,
         ]);
 
+        // Output 1: Live Preview Pipe (RGBA 320x180 rawvideo to stdout)
+        cmd.args([
+            "-map", "[prev]",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "pipe:1",
+        ]);
+
         // Setup pipes
         cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::null());
+        cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
         tracing::info!(
@@ -166,6 +269,21 @@ impl StreamRecorder {
         let mut child = cmd
             .spawn()
             .with_context(|| format!("Failed to spawn ffmpeg for source {}", self.source.name))?;
+
+        // Background thread to continuously read live preview frames from stdout
+        if let Some(stdout) = child.stdout.take() {
+            let frame_arc = Arc::clone(&self.latest_frame);
+            thread::spawn(move || {
+                use std::io::Read;
+                let mut reader = BufReader::with_capacity(320 * 180 * 4 * 2, stdout);
+                let mut buf = vec![0u8; 320 * 180 * 4];
+                while reader.read_exact(&mut buf).is_ok() {
+                    if let Ok(mut lock) = frame_arc.lock() {
+                        *lock = Some(buf.clone());
+                    }
+                }
+            });
+        }
 
         // Background thread to continuously drain stderr, avoid pipe stall, and capture live logs
         if let Some(stderr) = child.stderr.take() {
