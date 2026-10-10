@@ -86,3 +86,25 @@ impl Remuxer {
         Local::now().format("%Y%m%d_%H%M%S").to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_timestamp_format() {
+        let ts = Remuxer::generate_session_timestamp();
+        assert_eq!(ts.len(), 15); // YYYYMMDD_HHMMSS
+        assert_eq!(&ts[8..9], "_");
+        // Verify digits
+        assert!(ts.chars().filter(|c| c.is_ascii_digit()).count() == 14);
+    }
+
+    #[test]
+    fn test_stitch_empty_segments_fails() {
+        let dummy_out = PathBuf::from("/tmp/dummy_test_out.mp4");
+        let result = Remuxer::stitch_segments(&[], &dummy_out);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No segments provided"));
+    }
+}

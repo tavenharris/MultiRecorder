@@ -241,4 +241,47 @@ mod tests {
         assert_eq!(devices[2].name, "MacBook Pro Microphone");
         assert_eq!(devices[2].device_type, DeviceType::AudioInput);
     }
+
+    #[test]
+    fn test_loopback_detection_and_labels() {
+        let loopback = Device {
+            id: "in:2".to_string(),
+            index: 2,
+            name: "BlackHole 2ch".to_string(),
+            device_type: DeviceType::AudioInput,
+            av_index: Some(2),
+            resolution: None,
+            fps: None,
+        };
+        assert!(loopback.is_loopback());
+        assert_eq!(loopback.display_label(true), "🔄 [Loopback] BlackHole 2ch");
+
+        let mic = Device {
+            id: "in:0".to_string(),
+            index: 0,
+            name: "Internal Mic".to_string(),
+            device_type: DeviceType::AudioInput,
+            av_index: Some(0),
+            resolution: None,
+            fps: None,
+        };
+        assert!(!mic.is_loopback());
+        assert_eq!(mic.display_label(false), "🎙 [Mic 0] Internal Mic");
+
+        let output = Device {
+            id: "out:MacBook Pro Speakers".to_string(),
+            index: 0,
+            name: "MacBook Pro Speakers".to_string(),
+            device_type: DeviceType::AudioOutput,
+            av_index: None,
+            resolution: None,
+            fps: None,
+        };
+        assert_eq!(output.display_label(false), "🔊 [Output] MacBook Pro Speakers ⚠️ (Needs Loopback)");
+        assert_eq!(output.display_label(true), "🔊 [Output] MacBook Pro Speakers (via Loopback)");
+
+        let list = vec![mic, loopback.clone()];
+        assert!(DeviceManager::has_loopback_device(&list));
+        assert_eq!(DeviceManager::find_loopback_device(&list), Some(&loopback));
+    }
 }

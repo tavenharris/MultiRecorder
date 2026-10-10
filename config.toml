@@ -20,10 +20,10 @@ video_bitrate = "8M"
 encoder = "h264_videotoolbox"
 
 [[audio_tracks]]
-enabled = true
+enabled = false
 name = "MacBook Pro Microphone"
 device_index = 0
-device_id = "in:0"
+device_id = "none"
 
 [[audio_tracks]]
 enabled = false

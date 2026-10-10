@@ -153,6 +153,22 @@ mod tests {
         assert_eq!(stats.segment_count, 2);
         assert_eq!(stats.estimated_duration_secs, 4);
 
+        // Test get_segments_for_duration
+        let one_seg = mgr.get_segments_for_duration(Duration::from_secs(2)).unwrap();
+        assert_eq!(one_seg.len(), 1);
+        assert_eq!(one_seg[0], file2);
+
+        let both_segs = mgr.get_segments_for_duration(Duration::from_secs(4)).unwrap();
+        assert_eq!(both_segs.len(), 2);
+        assert_eq!(both_segs[0], file1);
+        assert_eq!(both_segs[1], file2);
+
+        // Test evict_older_than with 0 duration (evicts older than now)
+        std::thread::sleep(Duration::from_millis(100));
+        let evicted = mgr.evict_older_than(Duration::from_millis(50)).unwrap();
+        assert_eq!(evicted, 2);
+        assert_eq!(mgr.list_segments().unwrap().len(), 0);
+
         // Cleanup
         let _ = fs::remove_dir_all(&temp_dir);
     }
