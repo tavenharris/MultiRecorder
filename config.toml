@@ -16,9 +16,9 @@ enable_recording_preview = false
 
 [[sources]]
 name = "gameplay"
-video_device = "1"
+video_device = "3"
 resolution = "1920x1080"
-fps = 60
+fps = 30
 video_bitrate = "20M"
 encoder = "h264_videotoolbox"
 
@@ -33,15 +33,15 @@ encoder = "h264_videotoolbox"
 [[audio_tracks]]
 enabled = true
 name = "MacBook Pro Microphone"
-device_index = 1
-device_id = "in:1"
+device_index = 3
+device_id = "in:3"
 volume = 1.0
 
 [[audio_tracks]]
 enabled = true
 name = "BlackHole 2ch"
-device_index = 0
-device_id = "in:0"
+device_index = 1
+device_id = "in:1"
 volume = 1.0
 
 [[audio_tracks]]

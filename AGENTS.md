@@ -33,7 +33,14 @@ src/
 ├── recorder.rs     # Subprocess managers: PreviewStream, StreamRecorder, AudioTrackMonitor
 ├── remuxer.rs      # Concat demuxer (-c copy), SMPTE timecode injection & NLE export
 ├── ring_buffer.rs  # Sliding-window segment management, disk eviction & metrics
-└── ui.rs           # Flat dark-mode native GUI (egui 0.29), VU meters, 16:9 previews, Settings popup
+└── ui/             # Flat dark-mode native GUI (egui 0.29)
+    ├── mod.rs             # MultiRecordingApp state, background polling & CentralPanel coordinator
+    ├── theme.rs           # Permanent dark mode enforcement & flat design visual tokens
+    ├── engine_control.rs  # Device syncing, preview/audio monitor lifecycles, record & flashback exports
+    ├── top_bar.rs         # Top control bar (Record/Flashback, quick clip intervals, metrics, timer) & status banner
+    ├── video_panel.rs     # Responsive 16:9 video preview cards & input/output format controls
+    ├── audio_panel.rs     # 5-track audio mixer, fixed-width selectors, gain sliders & stereo L/R VU meters
+    └── settings_window.rs # Floating Preferences & Recording Settings modal window
 tests/
 └── integration_tests.rs # Complete headless test suite (HAL, ring buffer, sync, config, devices)
 docs/
@@ -49,12 +56,12 @@ docs/
   - `windows.rs`: Implements `CapturePlatform` for Windows: DirectShow (`ffmpeg -f dshow -list_devices true`) device parsing, desktop GDI grab (`gdigrab`), native WASAPI loopback audio, hardware encoder probe (`h264_nvenc` -> `h264_qsv` -> `h264_amf` -> `libx264`).
 - **`src/devices.rs`**: Public device manager interface delegating directly to `CurrentPlatform.discover_devices()`.
 - **`src/recorder.rs`**:
-  - `PreviewStream`: Spawns standby preview ffmpeg subprocess (`-vf scale=320:180... -f rawvideo -pix_fmt rgba pipe:1`). Continuously drains stdout for UI textures and parses stderr for real hardware canvas resolution and framerate.
-  - `StreamRecorder`: Spawns the active recording subprocess. Uses `-filter_complex "[0:v]split=2[rec_raw][prev_raw];..."` to simultaneously produce micro-segmented MP4s to buffer and stream 15fps 320x180 RGBA preview frames to `pipe:1`.
-  - `AudioTrackMonitor`: Spawns continuous audio probe reading raw `f32le` PCM samples. Computes real-time RMS/peak levels for animated segmented VU meters.
+  - `PreviewStream`: Spawns standby preview ffmpeg subprocess (`-vf scale=960:540... -f rawvideo -pix_fmt rgba pipe:1`). Continuously drains stdout for UI textures and parses stderr for real hardware canvas resolution and framerate.
+  - `StreamRecorder`: Spawns the active recording subprocess. Uses `-filter_complex "[0:v]split=2[rec_raw][prev_raw];..."` to simultaneously produce micro-segmented MP4s to buffer and stream 30fps 960x540 RGBA preview frames to `pipe:1`.
+  - `AudioTrackMonitor`: Spawns continuous stereo audio probe reading raw `f32le` PCM samples. Computes real-time Left/Right peak levels for animated segmented stereo VU meters.
 - **`src/ring_buffer.rs`**: Tracks segment timestamps in `<temp_dir>/multirecording_buffer/`, computes buffer disk usage, and evicts segments older than the configured sliding window (1m up to 2h).
 - **`src/remuxer.rs`**: Assembles flashback clips using FFmpeg's `concat` demuxer without decoding/re-encoding (`-c copy`). Injects SMPTE timecode (`-timecode HH:MM:SS:00`) for multicam synchronization in Premiere Pro / DaVinci Resolve.
-- **`src/ui.rs`**: Pure flat dark-theme interface with custom color tokens. Live 16:9 viewports with letterbox/pillarbox padding, discrete VU meters with fast attack and smooth broadcast decay, and an independent floating Settings popup window (`egui::Window`).
+- **`src/ui/`**: Pure flat dark-theme interface decomposed into focused submodules (`mod.rs`, `theme.rs`, `engine_control.rs`, `top_bar.rs`, `video_panel.rs`, `audio_panel.rs`, `settings_window.rs`).
 
 ---
 
