@@ -127,6 +127,13 @@ When modifying or refactoring this project, future agents **must respect these h
   1. `sync_device_selections()` in `src/ui.rs` cross-examines all configured audio tracks against `discovered_devices`. If a saved track cannot be resolved (cross-platform migration or unplugged device), it automatically re-maps Track 1 to the host's primary `AudioInput` hardware device.
   2. `build_recording_input_args()` in `src/platform/windows.rs` defensively checks for numeric or empty track IDs, resolving numeric indices to real DirectShow device names, and falling back to `-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000` to prevent any possibility of subprocess crashes.
 
+### M. Windows Audio Output Recording via In-Process WASAPI Loopback TCP Bridge
+- **The Quirk:** Standard Windows FFmpeg builds (e.g. Gyan.FFmpeg) do **not** include a `wasapi` input demuxer (`Unknown format 'wasapi'`), and DirectShow (`-f dshow`) only exposes hardware *input* devices (`Microphone ...`), failing with `0xfffffffb` if given an output endpoint like `audio="Speakers (Razer BlackShark V2 X USB)"`. Furthermore, Windows WASAPI Loopback pauses firing callbacks when no application is actively playing sound, which would stall an FFmpeg stream if not compensated.
+- **The Solution (`start_wasapi_loopback_bridge` in `src/platform/windows.rs`):**
+  1. When an enabled track on Windows targets an `AudioOutput` endpoint (`Speakers (Razer BlackShark V2 X USB)`, `ED270R M`, or `wasapi`), `build_recording_input_args()` binds an ephemeral local TCP listener (`127.0.0.1:0`) and spawns an in-process `cpal` WASAPI Loopback capture thread for that specific output device.
+  2. The bridge converts mono/stereo/surround output samples into stereo `f32le` PCM and streams them to FFmpeg via `-thread_queue_size 1024 -f f32le -sample_rate <sr> -ch_layout stereo -i tcp://127.0.0.1:<port>`.
+  3. Immediately upon connection, the bridge sends a 50ms silent primer so FFmpeg's `avformat_find_stream_info` completes instantaneously, and during desktop silence (`> 25ms` without a WASAPI callback), it synthesizes wall-clock-accurate silent stereo frames so segments never stall or drift.
+
 ---
 
 ## 4. Hardware Encoding Configuration

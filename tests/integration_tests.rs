@@ -334,8 +334,10 @@ fn test_cross_platform_hal_command_generation() {
     assert_eq!(win.audio_input_index(0), 1);
     assert_eq!(win.audio_input_index(1), 2);
     assert!(win_rec.contains(&"desktop".to_string()));
-    assert!(win_rec.contains(&"wasapi".to_string()));
-    assert!(win_rec.contains(&"default".to_string()));
+    assert!(
+        win_rec.iter().any(|a| a.starts_with("tcp://127.0.0.1:"))
+            || win_rec.contains(&"anullsrc=channel_layout=stereo:sample_rate=48000".to_string())
+    );
 
     // Audio VU meter monitor commands
     let mac_mon = mac.build_audio_monitor_args("0");
@@ -399,5 +401,26 @@ fn test_cross_platform_config_audio_track_migration() {
     let win_args = win.build_recording_input_args("desktop", 30, &cfg.audio_tracks);
     assert!(!win_args.contains(&"audio=0".to_string()));
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_windows_wasapi_loopback_tcp_bridge() {
+    use multirecording::platform::windows::start_wasapi_loopback_bridge;
+    use std::io::Read;
+    use std::net::TcpStream;
+
+    if let Some((port, sr)) = start_wasapi_loopback_bridge("Speakers (Razer BlackShark V2 X USB)") {
+        assert!(port > 0);
+        assert!(sr >= 8000);
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).unwrap();
+        assert!(n > 0, "Expected PCM stereo f32le bytes from WASAPI Loopback TCP bridge");
+    }
+}
+
 
 

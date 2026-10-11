@@ -26,7 +26,10 @@ impl Device {
             || lower.contains("soundflower")
             || lower.contains("multi-output")
             || lower.contains("aggregate")
-            || lower.contains("wasapi")
+            || lower.contains("stereo mix")
+            || lower.contains("vb-audio")
+            || lower.contains("virtual cable")
+            || lower.contains("virtual-audio-capturer")
     }
 
     pub fn display_label(&self, has_loopback: bool) -> String {

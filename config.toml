@@ -15,8 +15,8 @@ clip_intervals = [
 
 [[sources]]
 name = "gameplay"
-video_device = "Game Capture HD60 Pro"
-fps = 60
+video_device = "desktop"
+fps = 15
 video_bitrate = "30M"
 encoder = "h264_nvenc"
 
@@ -28,16 +28,16 @@ video_bitrate = "8M"
 encoder = "h264_nvenc"
 
 [[audio_tracks]]
-enabled = false
+enabled = true
 name = "Speakers (Razer BlackShark V2 X USB) (Default Output)"
-device_index = 0
-device_id = "none"
+device_index = 4
+device_id = "Speakers (Razer BlackShark V2 X USB)"
 
 [[audio_tracks]]
-enabled = false
-name = "Microphone"
+enabled = true
+name = "Microphone (Razer BlackShark V2 X USB)"
 device_index = 0
-device_id = "none"
+device_id = "Microphone (Razer BlackShark V2 X USB)"
 
 [[audio_tracks]]
 enabled = false

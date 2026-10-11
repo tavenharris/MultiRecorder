@@ -3,10 +3,13 @@ use crate::config::AudioTrackConfig;
 use crate::devices::{Device, DeviceType};
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::io::Write;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Check if ffmpeg is accessible in the current process's PATH.
 /// If not, searches the user's persistent Windows registry PATH (HKCU\Environment\Path)
@@ -395,42 +398,102 @@ impl WindowsPlatform {
                 || id.starts_with("out:")
                 || id.to_lowercase().contains("wasapi");
 
-            if is_wasapi {
-                args.extend([
-                    "-f".to_string(),
-                    "wasapi".to_string(),
-                    "-i".to_string(),
-                    "default".to_string(),
-                ]);
-            } else {
-                let clean_name = id
-                    .strip_prefix("audio=")
-                    .or_else(|| id.strip_prefix("in:"))
-                    .unwrap_or(id)
-                    .trim();
+            let clean_name = id
+                .strip_prefix("out:")
+                .or_else(|| id.strip_prefix("audio="))
+                .or_else(|| id.strip_prefix("in:"))
+                .unwrap_or(id)
+                .trim();
 
-                if clean_name.is_empty() || clean_name == "none" {
+            if is_wasapi {
+                if let Some((port, sr)) = start_wasapi_loopback_bridge(clean_name) {
+                    args.extend([
+                        "-thread_queue_size".to_string(),
+                        "1024".to_string(),
+                        "-f".to_string(),
+                        "f32le".to_string(),
+                        "-sample_rate".to_string(),
+                        sr.to_string(),
+                        "-ch_layout".to_string(),
+                        "stereo".to_string(),
+                        "-i".to_string(),
+                        format!("tcp://127.0.0.1:{}", port),
+                    ]);
+                } else {
                     args.extend([
                         "-f".to_string(),
                         "lavfi".to_string(),
                         "-i".to_string(),
                         "anullsrc=channel_layout=stereo:sample_rate=48000".to_string(),
                     ]);
-                } else if let Ok(num) = clean_name.parse::<usize>() {
-                    let dshow_audios = query_dshow_audio_devices();
-                    if let Some(real_name) = dshow_audios.get(num) {
+                }
+            } else if clean_name.is_empty() || clean_name == "none" {
+                args.extend([
+                    "-f".to_string(),
+                    "lavfi".to_string(),
+                    "-i".to_string(),
+                    "anullsrc=channel_layout=stereo:sample_rate=48000".to_string(),
+                ]);
+            } else if let Ok(num) = clean_name.parse::<usize>() {
+                let dshow_audios = query_dshow_audio_devices();
+                if let Some(real_name) = dshow_audios.get(num) {
+                    args.extend([
+                        "-f".to_string(),
+                        "dshow".to_string(),
+                        "-i".to_string(),
+                        format!("audio={}", real_name),
+                    ]);
+                } else if let Some(first) = dshow_audios.first() {
+                    args.extend([
+                        "-f".to_string(),
+                        "dshow".to_string(),
+                        "-i".to_string(),
+                        format!("audio={}", first),
+                    ]);
+                } else {
+                    args.extend([
+                        "-f".to_string(),
+                        "lavfi".to_string(),
+                        "-i".to_string(),
+                        "anullsrc=channel_layout=stereo:sample_rate=48000".to_string(),
+                    ]);
+                }
+            } else {
+                let dshow_audios = query_dshow_audio_devices();
+                let is_output_name = clean_name.to_lowercase().contains("speaker")
+                    || clean_name.to_lowercase().contains("output")
+                    || clean_name.to_lowercase().contains("headphones")
+                    || clean_name.to_lowercase().contains("monitor")
+                    || clean_name.to_lowercase().contains("desktop");
+
+                // 1. Exact match in DirectShow audio inputs (e.g. Microphone / Capture Card)
+                let exact_dshow = dshow_audios.iter().find(|d| {
+                    d.eq_ignore_ascii_case(clean_name)
+                        || clean_name.eq_ignore_ascii_case(d.as_str())
+                });
+
+                if let Some(real_name) = exact_dshow {
+                    args.extend([
+                        "-f".to_string(),
+                        "dshow".to_string(),
+                        "-i".to_string(),
+                        format!("audio={}", real_name),
+                    ]);
+                } else if is_output_name || is_cpal_output_device(clean_name) {
+                    // 2. Audio Output endpoint (e.g. Speakers (Razer BlackShark V2 X USB), ED270R M):
+                    // Capture natively via our in-process WASAPI Loopback -> TCP PCM bridge!
+                    if let Some((port, sr)) = start_wasapi_loopback_bridge(clean_name) {
                         args.extend([
+                            "-thread_queue_size".to_string(),
+                            "1024".to_string(),
                             "-f".to_string(),
-                            "dshow".to_string(),
+                            "f32le".to_string(),
+                            "-sample_rate".to_string(),
+                            sr.to_string(),
+                            "-ch_layout".to_string(),
+                            "stereo".to_string(),
                             "-i".to_string(),
-                            format!("audio={}", real_name),
-                        ]);
-                    } else if let Some(first) = dshow_audios.first() {
-                        args.extend([
-                            "-f".to_string(),
-                            "dshow".to_string(),
-                            "-i".to_string(),
-                            format!("audio={}", first),
+                            format!("tcp://127.0.0.1:{}", port),
                         ]);
                     } else {
                         args.extend([
@@ -440,6 +503,16 @@ impl WindowsPlatform {
                             "anullsrc=channel_layout=stereo:sample_rate=48000".to_string(),
                         ]);
                     }
+                } else if let Some(real_name) = dshow_audios.iter().find(|d| {
+                    d.to_lowercase().contains(&clean_name.to_lowercase())
+                        || clean_name.to_lowercase().contains(&d.to_lowercase())
+                }) {
+                    args.extend([
+                        "-f".to_string(),
+                        "dshow".to_string(),
+                        "-i".to_string(),
+                        format!("audio={}", real_name),
+                    ]);
                 } else {
                     let audio_arg = if clean_name.starts_with("audio=") {
                         clean_name.to_string()
@@ -512,7 +585,7 @@ impl WindowsPlatform {
     }
 
     pub fn has_loopback_support(&self, _devices: &[Device]) -> bool {
-        // Windows natively supports WASAPI loopback capture on all endpoints
+        // Windows natively supports capturing any AudioOutput endpoint via WASAPI Loopback
         true
     }
 
@@ -530,12 +603,12 @@ impl WindowsPlatform {
         ]
     }
 
-    #[allow(dead_code)]
     pub fn validate_audio_tracks(
         &self,
         _tracks: &[AudioTrackConfig],
         _devices: &[Device],
     ) -> Result<(), String> {
+        // Windows supports both DirectShow AudioInput and WASAPI Loopback AudioOutput natively
         Ok(())
     }
 }
@@ -584,11 +657,256 @@ impl CapturePlatform for WindowsPlatform {
 
     fn validate_audio_tracks(
         &self,
-        _tracks: &[AudioTrackConfig],
-        _devices: &[Device],
+        tracks: &[AudioTrackConfig],
+        devices: &[Device],
     ) -> Result<(), String> {
-        Ok(())
+        self.validate_audio_tracks(tracks, devices)
     }
+}
+
+/// Checks whether a given device identifier matches any Windows Audio Output endpoint via CPAL.
+fn is_cpal_output_device(identifier: &str) -> bool {
+    let clean = identifier
+        .replace(" (Default Output)", "")
+        .replace(" (WASAPI Loopback)", "")
+        .trim()
+        .to_lowercase();
+    if clean.is_empty() {
+        return false;
+    }
+    let host = cpal::default_host();
+    if let Ok(outputs) = host.output_devices() {
+        for dev in outputs {
+            if let Ok(desc) = dev.description() {
+                let d_name = desc.name().to_lowercase();
+                if d_name == clean || d_name.contains(&clean) || clean.contains(&d_name) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Starts a local in-process WASAPI Loopback -> TCP PCM (`f32le` stereo) bridge for FFmpeg.
+/// Because standard Windows FFmpeg builds lack a native `wasapi` input demuxer and DirectShow
+/// only exposes microphones/inputs, this bridge captures any Windows Audio Output endpoint
+/// (e.g. `Speakers (Razer BlackShark V2 X USB)`, `ED270R M`, or default desktop output)
+/// in shared WASAPI Loopback mode via `cpal` and streams continuous stereo `f32le` PCM over
+/// `127.0.0.1:<port>` to FFmpeg.
+///
+/// Includes a wall-clock-synchronized silence generator when Windows pauses WASAPI loopback
+/// callbacks during desktop silence so FFmpeg never stalls or drops segments.
+pub fn start_wasapi_loopback_bridge(identifier: &str) -> Option<(u16, u32)> {
+    let host = cpal::default_host();
+    let clean_id = identifier
+        .strip_prefix("out:")
+        .or_else(|| identifier.strip_prefix("audio="))
+        .or_else(|| identifier.strip_prefix("in:"))
+        .unwrap_or(identifier)
+        .replace(" (Default Output)", "")
+        .replace(" (WASAPI Loopback)", "")
+        .trim()
+        .to_string();
+
+    let is_default_alias = clean_id.is_empty()
+        || clean_id.eq_ignore_ascii_case("wasapi")
+        || clean_id.eq_ignore_ascii_case("default")
+        || clean_id.to_lowercase().contains("desktop");
+
+    let mut target_device = None;
+    if !is_default_alias {
+        let search = clean_id.to_lowercase();
+        if let Ok(outputs) = host.output_devices() {
+            for dev in outputs {
+                if let Ok(desc) = dev.description() {
+                    let d_name = desc.name().to_lowercase();
+                    if d_name == search || d_name.contains(&search) || search.contains(&d_name) {
+                        target_device = Some(dev);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if target_device.is_none() {
+        target_device = host.default_output_device();
+    }
+
+    let dev = target_device?;
+    let supported_config = dev.default_output_config().ok()?;
+    let sample_format = supported_config.sample_format();
+    let stream_config: cpal::StreamConfig = supported_config.into();
+    let sample_rate: u32 = stream_config.sample_rate.into();
+    let channels = (stream_config.channels as usize).max(1);
+
+    let listener = TcpListener::bind("127.0.0.1:0").ok()?;
+    let port = listener.local_addr().ok()?.port();
+    let _ = listener.set_nonblocking(true);
+
+    let clean_id_for_thread = clean_id.clone();
+    std::thread::spawn(move || {
+        // Wait up to 15 seconds for FFmpeg subprocess to connect to our local TCP socket
+        let mut tcp_stream = None;
+        for _ in 0..1500 {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_nodelay(true);
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                    tcp_stream = Some(stream);
+                    break;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return,
+            }
+        }
+
+        let mut tcp_stream = match tcp_stream {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Re-acquire output device inside the worker thread to own the CPAL stream handle
+        let host = cpal::default_host();
+        let mut thread_dev = None;
+        if !is_default_alias {
+            let search = clean_id_for_thread.to_lowercase();
+            if let Ok(outputs) = host.output_devices() {
+                for d in outputs {
+                    if let Ok(desc) = d.description() {
+                        let d_name = desc.name().to_lowercase();
+                        if d_name == search || d_name.contains(&search) || search.contains(&d_name) {
+                            thread_dev = Some(d);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if thread_dev.is_none() {
+            thread_dev = host.default_output_device();
+        }
+
+        let audio_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::with_capacity(65536)));
+        let buf_cb = Arc::clone(&audio_buf);
+
+        let push_stereo_f32 = move |samples_f32: &[f32]| {
+            if let Ok(mut guard) = buf_cb.lock() {
+                if guard.len() < (sample_rate as usize * 8) {
+                    for frame in samples_f32.chunks(channels) {
+                        let l = frame[0];
+                        let r = if channels > 1 { frame[1] } else { l };
+                        guard.extend_from_slice(&l.to_le_bytes());
+                        guard.extend_from_slice(&r.to_le_bytes());
+                    }
+                }
+            }
+        };
+
+        let _cpal_stream = thread_dev.and_then(|d| {
+            let stream_res = match sample_format {
+                cpal::SampleFormat::F32 => {
+                    let push = push_stereo_f32;
+                    d.build_input_stream(
+                        stream_config,
+                        move |data: &[f32], _| {
+                            push(data);
+                        },
+                        |_| {},
+                        None,
+                    )
+                }
+                cpal::SampleFormat::I16 => {
+                    let push = push_stereo_f32;
+                    d.build_input_stream(
+                        stream_config,
+                        move |data: &[i16], _| {
+                            let converted: Vec<f32> =
+                                data.iter().map(|&s| s as f32 / 32768.0).collect();
+                            push(&converted);
+                        },
+                        |_| {},
+                        None,
+                    )
+                }
+                cpal::SampleFormat::U16 => {
+                    let push = push_stereo_f32;
+                    d.build_input_stream(
+                        stream_config,
+                        move |data: &[u16], _| {
+                            let converted: Vec<f32> = data
+                                .iter()
+                                .map(|&s| (s as f32 - 32768.0) / 32768.0)
+                                .collect();
+                            push(&converted);
+                        },
+                        |_| {},
+                        None,
+                    )
+                }
+                _ => return None,
+            };
+            let s = stream_res.ok()?;
+            s.play().ok()?;
+            Some(s)
+        });
+
+        // Immediately send 50ms of stereo f32le silence so FFmpeg stream probing completes right away
+        let primer_frames = (sample_rate as usize) / 20;
+        let primer_bytes = vec![0u8; primer_frames * 8];
+        if tcp_stream.write_all(&primer_bytes).is_err() {
+            return;
+        }
+        let _ = tcp_stream.flush();
+
+        let mut last_audio_instant = Instant::now();
+        let silence_threshold = Duration::from_millis(25);
+
+        loop {
+            std::thread::sleep(Duration::from_millis(5));
+            let now = Instant::now();
+
+            let chunk = {
+                if let Ok(mut guard) = audio_buf.lock() {
+                    if !guard.is_empty() {
+                        let data = std::mem::take(&mut *guard);
+                        Some(data)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(data) = chunk {
+                last_audio_instant = now;
+                if tcp_stream.write_all(&data).is_err() {
+                    break;
+                }
+            } else {
+                // WASAPI Loopback pauses callbacks when no application is outputting sound.
+                // Generate wall-clock-accurate silent stereo frames so FFmpeg continues recording smoothly.
+                let elapsed = now.duration_since(last_audio_instant);
+                if elapsed >= silence_threshold {
+                    let silent_frames = (elapsed.as_secs_f64() * sample_rate as f64) as usize;
+                    if silent_frames > 0 {
+                        last_audio_instant +=
+                            Duration::from_secs_f64(silent_frames as f64 / sample_rate as f64);
+                        let silent_bytes = vec![0u8; silent_frames * 8];
+                        if tcp_stream.write_all(&silent_bytes).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    Some((port, sample_rate))
 }
 
 /// Spawns a real-time audio monitor stream using native Windows CoreAudio WASAPI loopback or capture via CPAL.
@@ -933,24 +1251,22 @@ mod tests {
         ];
 
         let args = win.build_recording_input_args("desktop", 60, &tracks);
-        assert_eq!(
-            args,
-            vec![
-                "-f",
-                "gdigrab",
-                "-framerate",
-                "60",
-                "-i",
-                "desktop",
-                "-f",
-                "dshow",
-                "-i",
-                "audio=Microphone Array",
-                "-f",
-                "wasapi",
-                "-i",
-                "default",
-            ]
+        assert_eq!(&args[0..10], &[
+            "-f",
+            "gdigrab",
+            "-framerate",
+            "60",
+            "-i",
+            "desktop",
+            "-f",
+            "dshow",
+            "-i",
+            "audio=Microphone Array",
+        ]);
+        // Track 1 ("wasapi") uses the native WASAPI Loopback TCP bridge (or lavfi fallback on headless CI)
+        assert!(
+            args.iter().any(|a| a.starts_with("tcp://127.0.0.1:"))
+                || args.contains(&"anullsrc=channel_layout=stereo:sample_rate=48000".to_string())
         );
         assert_eq!(win.audio_input_index(0), 1);
         assert_eq!(win.audio_input_index(1), 2);
