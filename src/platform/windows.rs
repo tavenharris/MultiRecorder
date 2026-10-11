@@ -556,7 +556,7 @@ impl WindowsPlatform {
                 "default".to_string(),
                 "-vn".to_string(),
                 "-ac".to_string(),
-                "1".to_string(),
+                "2".to_string(),
                 "-ar".to_string(),
                 "8000".to_string(),
                 "-f".to_string(),
@@ -580,7 +580,7 @@ impl WindowsPlatform {
                 input_arg,
                 "-vn".to_string(),
                 "-ac".to_string(),
-                "1".to_string(),
+                "2".to_string(),
                 "-ar".to_string(),
                 "8000".to_string(),
                 "-f".to_string(),
@@ -944,7 +944,11 @@ pub fn start_wasapi_loopback_bridge(identifier: &str) -> Option<(u16, u32)> {
 /// Spawns a real-time audio monitor stream using native Windows CoreAudio WASAPI loopback or capture via CPAL.
 /// Monitors peak levels directly without spawning external subprocesses.
 #[allow(dead_code)]
-pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal::Stream> {
+pub fn start_cpal_monitor(
+    identifier: &str,
+    peak_left: Arc<AtomicU32>,
+    peak_right: Arc<AtomicU32>,
+) -> Option<cpal::Stream> {
     let host = cpal::default_host();
     let clean_id = identifier
         .strip_prefix("out:")
@@ -1037,21 +1041,30 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
 
     let sample_format = supported_config.sample_format();
     let stream_config: cpal::StreamConfig = supported_config.into();
+    let channels = (stream_config.channels as usize).max(1);
 
-    let peak_clone = Arc::clone(&peak);
+    let peak_l = Arc::clone(&peak_left);
+    let peak_r = Arc::clone(&peak_right);
     let stream = match sample_format {
         cpal::SampleFormat::F32 => dev.build_input_stream(
             stream_config,
             move |data: &[f32], _| {
-                let mut max_abs: f32 = 0.0;
-                for &s in data {
-                    let a = s.abs();
-                    if a > max_abs {
-                        max_abs = a;
+                let mut max_l: f32 = 0.0;
+                let mut max_r: f32 = 0.0;
+                for frame in data.chunks(channels) {
+                    let l = frame[0].abs();
+                    let r = if channels > 1 { frame[1].abs() } else { l };
+                    if l > max_l {
+                        max_l = l;
+                    }
+                    if r > max_r {
+                        max_r = r;
                     }
                 }
-                let boost = (max_abs * 2.5).clamp(0.0, 1.0);
-                peak_clone.store((boost * 10000.0) as u32, Ordering::Relaxed);
+                let boost_l = (max_l * 2.5).clamp(0.0, 1.0);
+                let boost_r = (max_r * 2.5).clamp(0.0, 1.0);
+                peak_l.store((boost_l * 10000.0) as u32, Ordering::Relaxed);
+                peak_r.store((boost_r * 10000.0) as u32, Ordering::Relaxed);
             },
             |err| {
                 let err_str = format!("{:?}", err);
@@ -1064,15 +1077,26 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
         cpal::SampleFormat::I16 => dev.build_input_stream(
             stream_config,
             move |data: &[i16], _| {
-                let mut max_abs: f32 = 0.0;
-                for &s in data {
-                    let a = (s as f32 / 32768.0).abs();
-                    if a > max_abs {
-                        max_abs = a;
+                let mut max_l: f32 = 0.0;
+                let mut max_r: f32 = 0.0;
+                for frame in data.chunks(channels) {
+                    let l = (frame[0] as f32 / 32768.0).abs();
+                    let r = if channels > 1 {
+                        (frame[1] as f32 / 32768.0).abs()
+                    } else {
+                        l
+                    };
+                    if l > max_l {
+                        max_l = l;
+                    }
+                    if r > max_r {
+                        max_r = r;
                     }
                 }
-                let boost = (max_abs * 2.5).clamp(0.0, 1.0);
-                peak_clone.store((boost * 10000.0) as u32, Ordering::Relaxed);
+                let boost_l = (max_l * 2.5).clamp(0.0, 1.0);
+                let boost_r = (max_r * 2.5).clamp(0.0, 1.0);
+                peak_l.store((boost_l * 10000.0) as u32, Ordering::Relaxed);
+                peak_r.store((boost_r * 10000.0) as u32, Ordering::Relaxed);
             },
             |err| {
                 let err_str = format!("{:?}", err);
@@ -1085,15 +1109,26 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
         cpal::SampleFormat::U16 => dev.build_input_stream(
             stream_config,
             move |data: &[u16], _| {
-                let mut max_abs: f32 = 0.0;
-                for &s in data {
-                    let a = ((s as f32 - 32768.0) / 32768.0).abs();
-                    if a > max_abs {
-                        max_abs = a;
+                let mut max_l: f32 = 0.0;
+                let mut max_r: f32 = 0.0;
+                for frame in data.chunks(channels) {
+                    let l = ((frame[0] as f32 - 32768.0) / 32768.0).abs();
+                    let r = if channels > 1 {
+                        ((frame[1] as f32 - 32768.0) / 32768.0).abs()
+                    } else {
+                        l
+                    };
+                    if l > max_l {
+                        max_l = l;
+                    }
+                    if r > max_r {
+                        max_r = r;
                     }
                 }
-                let boost = (max_abs * 2.5).clamp(0.0, 1.0);
-                peak_clone.store((boost * 10000.0) as u32, Ordering::Relaxed);
+                let boost_l = (max_l * 2.5).clamp(0.0, 1.0);
+                let boost_r = (max_r * 2.5).clamp(0.0, 1.0);
+                peak_l.store((boost_l * 10000.0) as u32, Ordering::Relaxed);
+                peak_r.store((boost_r * 10000.0) as u32, Ordering::Relaxed);
             },
             |err| {
                 let err_str = format!("{:?}", err);
@@ -1269,12 +1304,14 @@ mod tests {
                 name: "Mic".to_string(),
                 device_index: 0,
                 device_id: "Microphone Array".to_string(),
+                volume: 1.0,
             },
             AudioTrackConfig {
                 enabled: true,
                 name: "Desktop Audio".to_string(),
                 device_index: 1,
                 device_id: "wasapi".to_string(),
+                volume: 1.0,
             },
         ];
 
@@ -1307,7 +1344,7 @@ mod tests {
         assert_eq!(
             wasapi_args,
             vec![
-                "-f", "wasapi", "-i", "default", "-vn", "-ac", "1", "-ar", "8000", "-f",
+                "-f", "wasapi", "-i", "default", "-vn", "-ac", "2", "-ar", "8000", "-f",
                 "f32le", "pipe:1"
             ]
         );
@@ -1322,7 +1359,7 @@ mod tests {
                 "audio=Microphone Array",
                 "-vn",
                 "-ac",
-                "1",
+                "2",
                 "-ar",
                 "8000",
                 "-f",
@@ -1341,12 +1378,14 @@ mod tests {
                 name: "Taven’s AirPods Pro".to_string(),
                 device_index: 0,
                 device_id: "in:0".to_string(),
+                volume: 1.0,
             },
             AudioTrackConfig {
                 enabled: true,
                 name: "None Track".to_string(),
                 device_index: 1,
                 device_id: "none".to_string(),
+                volume: 1.0,
             },
         ];
 

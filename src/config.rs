@@ -33,6 +33,13 @@ pub struct Config {
     /// Flashback clip intervals in seconds shown as quick save buttons in the UI
     #[serde(default = "default_clip_intervals")]
     pub clip_intervals: Vec<u64>,
+    /// Stream live video preview thumbnail into GUI while recording is active (disable for maximum gaming performance)
+    #[serde(default = "default_enable_recording_preview")]
+    pub enable_recording_preview: bool,
+}
+
+fn default_enable_recording_preview() -> bool {
+    true
 }
 
 fn default_sync_audio_to_secondary() -> bool {
@@ -55,6 +62,10 @@ pub fn default_clip_intervals() -> Vec<u64> {
     vec![30, 60, 300, 1200]
 }
 
+fn default_track_volume() -> f32 {
+    1.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioTrackConfig {
     pub enabled: bool,
@@ -65,6 +76,9 @@ pub struct AudioTrackConfig {
     /// Unique device identifier (e.g. "in:0", "out:MacBook Pro Speakers")
     #[serde(default)]
     pub device_id: String,
+    /// Linear audio gain / volume multiplier (0.0 = Mute, 1.0 = 100% Unity, 2.0 = 200% / +6dB)
+    #[serde(default = "default_track_volume")]
+    pub volume: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,30 +104,35 @@ pub fn default_audio_tracks() -> Vec<AudioTrackConfig> {
             name: "Game Audio".to_string(),
             device_index: 0,
             device_id: "in:0".to_string(),
+            volume: 1.0,
         },
         AudioTrackConfig {
             enabled: true,
             name: "Microphone".to_string(),
             device_index: 0,
             device_id: "in:0".to_string(),
+            volume: 1.0,
         },
         AudioTrackConfig {
             enabled: false,
             name: "Discord / Chat".to_string(),
             device_index: 0,
             device_id: "in:0".to_string(),
+            volume: 1.0,
         },
         AudioTrackConfig {
             enabled: false,
             name: "Desktop / Speakers".to_string(),
             device_index: 0,
             device_id: "out:MacBook Pro Speakers".to_string(),
+            volume: 1.0,
         },
         AudioTrackConfig {
             enabled: false,
             name: "AirPods / Aux".to_string(),
             device_index: 0,
             device_id: "out:AirPods".to_string(),
+            volume: 1.0,
         },
     ]
 }
@@ -152,6 +171,7 @@ impl Default for Config {
             sync_audio_to_secondary: true,
             embed_timecode: true,
             clip_intervals: default_clip_intervals(),
+            enable_recording_preview: true,
         }
     }
 }
@@ -237,7 +257,14 @@ impl Config {
                 name: format!("Track {}", idx),
                 device_index: 0,
                 device_id: "none".to_string(),
+                volume: 1.0,
             });
+        }
+
+        for track in &mut self.audio_tracks {
+            if !track.volume.is_finite() || track.volume < 0.0 || track.volume > 4.0 {
+                track.volume = 1.0;
+            }
         }
 
         // Detect whether config was previously saved on a different OS

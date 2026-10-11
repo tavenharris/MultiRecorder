@@ -12,12 +12,13 @@ clip_intervals = [
     300,
     1800,
 ]
+enable_recording_preview = false
 
 [[sources]]
 name = "gameplay"
 video_device = "1"
 resolution = "1920x1080"
-fps = 30
+fps = 60
 video_bitrate = "20M"
 encoder = "h264_videotoolbox"
 
@@ -31,30 +32,35 @@ encoder = "h264_videotoolbox"
 
 [[audio_tracks]]
 enabled = true
-name = "BlackHole 2ch"
+name = "MacBook Pro Microphone"
 device_index = 1
 device_id = "in:1"
+volume = 1.0
 
 [[audio_tracks]]
 enabled = true
-name = "Taven’s AirPods Pro"
+name = "BlackHole 2ch"
 device_index = 0
 device_id = "in:0"
+volume = 1.0
 
 [[audio_tracks]]
 enabled = false
 name = "Discord / Chat"
 device_index = 0
 device_id = "none"
+volume = 1.0
 
 [[audio_tracks]]
 enabled = false
 name = "Desktop / Music"
 device_index = 0
 device_id = "none"
+volume = 1.0
 
 [[audio_tracks]]
 enabled = false
 name = "Aux / Soundboard"
 device_index = 0
 device_id = "none"
+volume = 1.0

@@ -54,7 +54,7 @@ pub struct MultiRecordingApp {
     selected_flashback_secs: u64,
     show_settings: bool,
     recording_started_at: Option<Instant>,
-    audio_levels: [f32; 5],
+    audio_levels: [(f32, f32); 5],
 
     // Selected video device indices
     game_video_idx: usize,
@@ -110,7 +110,7 @@ impl MultiRecordingApp {
             selected_flashback_secs: selected_secs,
             show_settings: false,
             recording_started_at: None,
-            audio_levels: [0.0; 5],
+            audio_levels: [(0.0, 0.0); 5],
             audio_monitors: [None, None, None, None, None],
             game_video_idx: 0,
             cam_video_idx: 0,
@@ -169,7 +169,7 @@ impl MultiRecordingApp {
                 if let Some(mut old) = self.audio_monitors[i].take() {
                     old.stop();
                 }
-                self.audio_levels[i] = 0.0;
+                self.audio_levels[i] = (0.0, 0.0);
             }
             return;
         }
@@ -218,7 +218,7 @@ impl MultiRecordingApp {
             if let Some(mut old) = self.audio_monitors[i].take() {
                 old.stop();
             }
-            self.audio_levels[i] = 0.0;
+            self.audio_levels[i] = (0.0, 0.0);
         }
     }
 
@@ -261,7 +261,7 @@ impl MultiRecordingApp {
             if let Some(mut old) = self.audio_monitors[i].take() {
                 old.stop();
             }
-            self.audio_levels[i] = 0.0;
+            self.audio_levels[i] = (0.0, 0.0);
         }
         self.preview_texture_1 = None;
         self.preview_texture_2 = None;
@@ -574,6 +574,31 @@ impl MultiRecordingApp {
                     });
             });
         });
+
+        // 4. Real-time encoder health & bottleneck diagnostic (shown during recording)
+        if self.is_recording {
+            if let Some(rec) = self.recorders.get(stream_idx) {
+                let health = rec.get_health();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if health.frames_processed > 0 {
+                        if health.is_lagging {
+                            ui.label(RichText::new("⚠️ ENCODER BOTTLENECK:").size(10.5).color(Color32::from_rgb(244, 63, 94)).strong());
+                            ui.label(RichText::new(format!("{:.1} fps ({:.2}x speed) - Dropping frames!", health.current_fps, health.speed_ratio)).size(10.5).color(Color32::from_rgb(251, 113, 133)));
+                        } else {
+                            ui.label(RichText::new("⚡ Real-time:").size(10.5).color(Color32::from_rgb(16, 185, 129)).strong());
+                            ui.label(RichText::new(format!("{:.1} fps ({:.2}x speed)", health.current_fps, health.speed_ratio)).size(10.5).color(Color32::from_rgb(212, 212, 216)));
+                        }
+                    } else {
+                        ui.label(RichText::new("⚡ Encoder:").size(10.5).color(Color32::from_rgb(161, 161, 170)));
+                        ui.label(RichText::new("Initializing stream...").size(10.5).color(Color32::from_rgb(113, 113, 122)));
+                    }
+                });
+            } else if self.recorders.len() == 1 && stream_idx == 1 {
+                ui.add_space(4.0);
+                ui.label(RichText::new("ℹ️ Standby (Single video source active)").size(10.5).color(Color32::from_rgb(113, 113, 122)));
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -619,6 +644,21 @@ impl MultiRecordingApp {
             format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
         } else {
             format!("{}m {}s", secs / 60, secs % 60)
+        }
+    }
+
+    /// Formats an audio device label to a fixed character length (truncating with '…' if longer,
+    /// or right-padding to `max_chars` so all device selector buttons maintain identical width).
+    pub fn format_fixed_audio_label(raw: &str, max_chars: usize) -> String {
+        if max_chars == 0 {
+            return String::new();
+        }
+        let char_count = raw.chars().count();
+        if char_count > max_chars {
+            let truncated: String = raw.chars().take(max_chars.saturating_sub(1)).collect();
+            format!("{}…", truncated)
+        } else {
+            format!("{:<width$}", raw, width = max_chars)
         }
     }
 
@@ -716,11 +756,12 @@ impl MultiRecordingApp {
             } else {
                 vec![]
             };
-            let mut recorder = StreamRecorder::new(
+            let mut recorder = StreamRecorder::with_preview(
                 src.clone(),
                 tracks,
                 self.config.segment_duration_secs,
                 self.config.audio_bitrate.clone(),
+                self.config.enable_recording_preview,
             );
             if let Err(e) = recorder.start(&self.config.buffer_dir) {
                 self.status_message = Some((
@@ -1025,13 +1066,8 @@ impl MultiRecordingApp {
     }
 }
 
-// Custom VU Peak Level Meter Widget (Matching user sketch colors & segments)
-fn draw_vu_meter(ui: &mut egui::Ui, level: f32, is_active: bool, width: f32) {
-    let height = 16.0;
-    let (rect, _response) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
-    let painter = ui.painter();
-
-    let rounding = Rounding::same(3.0);
+fn draw_single_vu_bar(painter: &egui::Painter, rect: egui::Rect, level: f32, is_active: bool) {
+    let rounding = Rounding::same(2.0);
     painter.rect_filled(rect, rounding, Color32::from_rgb(18, 18, 22));
 
     // Threshold boundaries
@@ -1077,7 +1113,7 @@ fn draw_vu_meter(ui: &mut egui::Ui, level: f32, is_active: bool, width: f32) {
             let lit_x = cur_x.min(x1 - 1.0);
             painter.rect_filled(
                 egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(lit_x, rect.bottom())),
-                Rounding::same(2.0),
+                Rounding::same(1.5),
                 Color32::from_rgb(132, 204, 22), // Lime green
             );
         }
@@ -1104,7 +1140,7 @@ fn draw_vu_meter(ui: &mut egui::Ui, level: f32, is_active: bool, width: f32) {
             let lit_x = cur_x.min(x4);
             painter.rect_filled(
                 egui::Rect::from_min_max(egui::pos2(x3, rect.top()), egui::pos2(lit_x, rect.bottom())),
-                Rounding::same(2.0),
+                Rounding::same(1.5),
                 Color32::from_rgb(239, 68, 68), // Red
             );
         }
@@ -1112,6 +1148,48 @@ fn draw_vu_meter(ui: &mut egui::Ui, level: f32, is_active: bool, width: f32) {
 
     // Outer subtle border
     painter.rect_stroke(rect, rounding, Stroke::new(1.0_f32, Color32::from_rgb(42, 42, 48)));
+}
+
+// Custom Stereo (Left / Right) VU Peak Level Meter Widget
+fn draw_stereo_vu_meter(ui: &mut egui::Ui, levels: (f32, f32), is_active: bool, width: f32) {
+    let total_height = 20.0;
+    let bar_height = 8.5;
+    let label_col_w = 13.0;
+    let (rect, _response) = ui.allocate_exact_size(Vec2::new(width, total_height), egui::Sense::hover());
+    let painter = ui.painter();
+
+    let bar_left_x = (rect.left() + label_col_w).min(rect.right());
+    let top_bar_rect = egui::Rect::from_min_max(
+        egui::pos2(bar_left_x, rect.top()),
+        egui::pos2(rect.right(), rect.top() + bar_height),
+    );
+    let bottom_bar_rect = egui::Rect::from_min_max(
+        egui::pos2(bar_left_x, rect.bottom() - bar_height),
+        egui::pos2(rect.right(), rect.bottom()),
+    );
+
+    let ch_color = if is_active {
+        Color32::from_rgb(161, 161, 170)
+    } else {
+        Color32::from_rgb(90, 90, 100)
+    };
+    painter.text(
+        egui::pos2(rect.left() + 4.5, top_bar_rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        "L",
+        FontId::new(8.5, FontFamily::Monospace),
+        ch_color,
+    );
+    painter.text(
+        egui::pos2(rect.left() + 4.5, bottom_bar_rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        "R",
+        FontId::new(8.5, FontFamily::Monospace),
+        ch_color,
+    );
+
+    draw_single_vu_bar(painter, top_bar_rect, levels.0, is_active);
+    draw_single_vu_bar(painter, bottom_bar_rect, levels.1, is_active);
 }
 
 impl eframe::App for MultiRecordingApp {
@@ -1214,20 +1292,36 @@ impl eframe::App for MultiRecordingApp {
             }
         }
 
-        // 2. Sample Audio VU Levels from Real Hardware Monitors
+        // 2. Sample Stereo (L/R) Audio VU Levels from Real Hardware Monitors & apply per-track Gain/Volume
         for i in 0..5 {
-            let track_enabled = self.config.audio_tracks.get(i).map(|t| t.enabled).unwrap_or(false);
+            let (track_enabled, gain) = self
+                .config
+                .audio_tracks
+                .get(i)
+                .map(|t| (t.enabled, t.volume.max(0.0)))
+                .unwrap_or((false, 1.0));
             if track_enabled {
-                let peak = self.audio_monitors[i].as_ref().map(|m| m.get_peak()).unwrap_or(0.0);
-                if peak > self.audio_levels[i] {
-                    // Fast attack for punchy responsiveness
-                    self.audio_levels[i] = self.audio_levels[i] * 0.2 + peak * 0.8;
+                let (raw_l, raw_r) = self.audio_monitors[i]
+                    .as_ref()
+                    .map(|m| m.get_peaks())
+                    .unwrap_or((0.0, 0.0));
+                let peak_l = (raw_l * gain).clamp(0.0, 1.0);
+                let peak_r = (raw_r * gain).clamp(0.0, 1.0);
+
+                let (mut cur_l, mut cur_r) = self.audio_levels[i];
+                if peak_l > cur_l {
+                    cur_l = cur_l * 0.2 + peak_l * 0.8;
                 } else {
-                    // Smooth broadcast decay
-                    self.audio_levels[i] *= 0.88;
+                    cur_l *= 0.88;
                 }
+                if peak_r > cur_r {
+                    cur_r = cur_r * 0.2 + peak_r * 0.8;
+                } else {
+                    cur_r *= 0.88;
+                }
+                self.audio_levels[i] = (cur_l, cur_r);
             } else {
-                self.audio_levels[i] = 0.0;
+                self.audio_levels[i] = (0.0, 0.0);
             }
         }
 
@@ -1461,6 +1555,35 @@ impl eframe::App for MultiRecordingApp {
                                 "0 Mb/s".to_string()
                             };
                             ui.label(RichText::new(format!("{}  {}", bitrate_str, size_str)).font(FontId::new(15.0, FontFamily::Proportional)).color(Color32::from_rgb(212, 212, 216)));
+
+                            if self.is_recording {
+                                ui.add_space(12.0);
+                                if let Some(lag) = self.recorders.iter().find(|r| r.get_health().is_lagging) {
+                                    let h = lag.get_health();
+                                    ui.label(
+                                        RichText::new(format!("⚠️ BOTTLENECK: [{}] {:.1} fps ({:.2}x)", lag.source_name(), h.current_fps, h.speed_ratio))
+                                            .font(FontId::new(13.0, FontFamily::Proportional))
+                                            .color(Color32::from_rgb(244, 63, 94))
+                                            .strong()
+                                    ).on_hover_text("Bottleneck detected! Encoding is slower than real-time (speed < 1.0x).\nTo fix:\n1. Lower resolution (e.g. to 1080p or 720p)\n2. Lower framerate to 30 fps\n3. In Settings, disable 'Live Preview while Recording' for maximum performance\n4. Close CPU/GPU-heavy background apps");
+                                } else if let Some(rec) = self.recorders.first() {
+                                    let h = rec.get_health();
+                                    if h.frames_processed > 0 {
+                                        ui.label(
+                                            RichText::new(format!("⚡ {:.1} fps ({:.2}x) Real-time", h.current_fps, h.speed_ratio))
+                                                .font(FontId::new(13.0, FontFamily::Proportional))
+                                                .color(Color32::from_rgb(16, 185, 129))
+                                                .strong()
+                                        ).on_hover_text("Encoding performance is smooth and in real-time (speed >= 1.0x). Zero frames dropped.");
+                                    } else {
+                                        ui.label(
+                                            RichText::new("⚡ Initializing Encoder...")
+                                                .font(FontId::new(13.0, FontFamily::Proportional))
+                                                .color(Color32::from_rgb(161, 161, 170))
+                                        );
+                                    }
+                                }
+                            }
                         });
                     });
                 });
@@ -1490,7 +1613,93 @@ impl eframe::App for MultiRecordingApp {
 
             ui.add_space(4.0);
 
-            ui.add_space(8.0);
+            // ==========================================
+            // REAL-TIME BOTTLENECK & STREAM HEALTH MONITOR
+            // ==========================================
+            if self.is_recording {
+                let has_bottleneck = self.recorders.iter().any(|r| r.get_health().is_lagging);
+                let (border, fill) = if has_bottleneck {
+                    (Color32::from_rgb(225, 29, 72), Color32::from_rgb(38, 14, 20))
+                } else {
+                    (Color32::from_rgb(16, 185, 129), Color32::from_rgb(12, 28, 22))
+                };
+
+                let mode_str = match self.recording_mode {
+                    Some(RecordingMode::Flashback) => "Flashback Ring Buffer",
+                    Some(RecordingMode::Continuous) => "Continuous Recording",
+                    None => "Recording",
+                };
+
+                egui::Frame::none()
+                    .fill(fill)
+                    .stroke(Stroke::new(1.0_f32, border))
+                    .rounding(Rounding::same(6.0))
+                    .inner_margin(Margin::symmetric(14.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if has_bottleneck {
+                                ui.label(
+                                    RichText::new("⚠️ ENCODER BOTTLENECK DETECTED")
+                                        .font(FontId::new(12.0, FontFamily::Proportional))
+                                        .color(Color32::from_rgb(244, 63, 94))
+                                        .strong()
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new("⚡ STREAM HEALTH & BOTTLENECK MONITOR")
+                                        .font(FontId::new(12.0, FontFamily::Proportional))
+                                        .color(Color32::from_rgb(16, 185, 129))
+                                        .strong()
+                                );
+                            }
+
+                            ui.separator();
+                            ui.label(RichText::new(mode_str).size(11.5).color(Color32::from_rgb(161, 161, 170)));
+
+                            for rec in &self.recorders {
+                                ui.separator();
+                                let h = rec.get_health();
+                                if h.frames_processed > 0 {
+                                    let (col, status_text) = if h.is_lagging {
+                                        (Color32::from_rgb(244, 63, 94), "⚠️ Dropping frames")
+                                    } else {
+                                        (Color32::from_rgb(52, 211, 153), "Smooth (Real-time)")
+                                    };
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "[{}] {:.1} fps • {:.2}x speed • {}",
+                                            rec.source_name(),
+                                            h.current_fps,
+                                            h.speed_ratio,
+                                            status_text
+                                        ))
+                                        .size(11.5)
+                                        .color(col)
+                                        .strong()
+                                    );
+                                } else {
+                                    ui.label(
+                                        RichText::new(format!("[{}] Initializing encoder...", rec.source_name()))
+                                            .size(11.5)
+                                            .color(Color32::from_rgb(161, 161, 170))
+                                    );
+                                }
+                            }
+
+                            if has_bottleneck {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new("Tip: Lower output resolution or disable Live Preview in Settings")
+                                            .size(11.0)
+                                            .color(Color32::from_rgb(251, 113, 133))
+                                    );
+                                });
+                            }
+                        });
+                    });
+
+                ui.add_space(8.0);
+            }
 
             // ==========================================
             // VIDEO SECTION (Matching User Sketch)
@@ -1657,13 +1866,7 @@ impl eframe::App for MultiRecordingApp {
             ui.add_space(10.0);
 
             // ==========================================
-            // AUDIO SECTION (Matching User Sketch)
-            // Audio
-            // 1 [ Audio Mic input        ▼ ] [ VU Meter ]
-            // 2 [ Desktop Audio          ▼ ] [ VU Meter ]
-            // 3 [ Airpods Pro Speakers   ▼ ] [ VU Meter ]
-            // 4 [ None                   ▼ ] [ VU Meter ]
-            // 5 [ None                   ▼ ] [ VU Meter ]
+            // AUDIO SECTION (Fixed-Width Device Selector + Gain/Volume Slider + Dual L/R Stereo VU Meter)
             // ==========================================
             ui.label(RichText::new("Audio").font(FontId::new(15.0, FontFamily::Proportional)).strong().color(Color32::from_rgb(244, 244, 245)));
             ui.add_space(4.0);
@@ -1672,6 +1875,7 @@ impl eframe::App for MultiRecordingApp {
             let has_loopback = self.has_loopback;
 
             let mut audio_changed = false;
+            let mut volume_changed = false;
 
             egui::Frame::none()
                 .fill(Color32::from_rgb(22, 22, 26))
@@ -1679,17 +1883,33 @@ impl eframe::App for MultiRecordingApp {
                 .rounding(Rounding::same(6.0))
                 .inner_margin(Margin::same(12.0))
                 .show(ui, |ui| {
+                    let row_height = 24.0;
+                    let idx_col_w = 18.0;
+                    let dev_col_w = 220.0;
+                    let gain_col_w = 170.0;
+
                     for i in 0..5 {
                         let track = &mut self.config.audio_tracks[i];
 
                         ui.horizontal(|ui| {
-                            // Track Number: 1..5
-                            ui.label(RichText::new(format!("{}", i + 1)).font(FontId::new(14.0, FontFamily::Proportional)).strong().color(Color32::from_rgb(212, 212, 216)));
+                            // 1. Track Number (Fixed width so all columns align)
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(idx_col_w, row_height),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_min_width(idx_col_w);
+                                    ui.set_max_width(idx_col_w);
+                                    ui.label(
+                                        RichText::new(format!("{}", i + 1))
+                                            .font(FontId::new(14.0, FontFamily::Proportional))
+                                            .strong()
+                                            .color(Color32::from_rgb(212, 212, 216)),
+                                    );
+                                },
+                            );
 
-                            ui.add_space(4.0);
-
-                            // Dropdown Box (e.g. "Audio Mic input", "Desktop Audio", or "None")
-                            let selected_text = if !track.enabled || track.device_id == "none" {
+                            // 2. Fixed-Width Audio Device Dropdown (Fixed char length + fixed pixel box)
+                            let full_selected_text = if !track.enabled || track.device_id == "none" {
                                 "None".to_string()
                             } else {
                                 audio_device_items
@@ -1698,50 +1918,138 @@ impl eframe::App for MultiRecordingApp {
                                     .map(|d| d.display_label(has_loopback))
                                     .unwrap_or_else(|| track.name.clone())
                             };
+                            let fixed_selected_text = Self::format_fixed_audio_label(&full_selected_text, 24);
 
-                            egui::ComboBox::from_id_source(format!("audio_track_box_{}", i))
-                                .width(220.0)
-                                .selected_text(selected_text)
-                                .show_ui(ui, |ui| {
-                                    // Option: None
-                                    if ui.selectable_label(!track.enabled, "None").clicked() {
-                                        track.enabled = false;
-                                        track.device_id = "none".to_string();
-                                        audio_changed = true;
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(dev_col_w, row_height),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_min_width(dev_col_w);
+                                    ui.set_max_width(dev_col_w);
+
+                                    let combo_resp = egui::ComboBox::from_id_source(format!("audio_track_box_{}", i))
+                                        .width(dev_col_w - 4.0)
+                                        .truncate()
+                                        .selected_text(
+                                            RichText::new(fixed_selected_text)
+                                                .font(FontId::new(11.5, FontFamily::Monospace)),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            // Option: None
+                                            if ui.selectable_label(!track.enabled, "None").clicked() {
+                                                track.enabled = false;
+                                                track.device_id = "none".to_string();
+                                                audio_changed = true;
+                                            }
+
+                                            ui.separator();
+                                            ui.label(RichText::new("── HARDWARE INPUTS ──").size(10.0).color(Color32::from_rgb(156, 163, 175)));
+                                            for dev in audio_device_items.iter().filter(|d| d.device_type == DeviceType::AudioInput) {
+                                                let is_sel = track.enabled && track.device_id == dev.id;
+                                                if ui.selectable_label(is_sel, dev.display_label(has_loopback)).clicked() {
+                                                    track.enabled = true;
+                                                    track.device_id = dev.id.clone();
+                                                    track.device_index = dev.av_index.unwrap_or(0);
+                                                    track.name = dev.name.clone();
+                                                    audio_changed = true;
+                                                }
+                                            }
+
+                                            ui.separator();
+                                            ui.label(RichText::new("── AUDIO OUTPUTS ──").size(10.0).color(Color32::from_rgb(156, 163, 175)));
+                                            for dev in audio_device_items.iter().filter(|d| d.device_type == DeviceType::AudioOutput) {
+                                                let is_sel = track.enabled && track.device_id == dev.id;
+                                                if ui.selectable_label(is_sel, dev.display_label(has_loopback)).clicked() {
+                                                    track.enabled = true;
+                                                    track.device_id = dev.id.clone();
+                                                    track.device_index = dev.av_index.unwrap_or(0);
+                                                    track.name = dev.name.clone();
+                                                    audio_changed = true;
+                                                }
+                                            }
+                                        });
+                                    combo_resp.response.on_hover_text(&full_selected_text);
+                                },
+                            );
+
+                            ui.add_space(6.0);
+
+                            // 3. Gain / Volume Slider (Fixed width: Mute toggle + 0..200% slider + % readout)
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(gain_col_w, row_height),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_min_width(gain_col_w);
+                                    ui.set_max_width(gain_col_w);
+
+                                    let mut pct = (track.volume * 100.0).round().clamp(0.0, 200.0) as i32;
+                                    let icon = if !track.enabled || pct == 0 {
+                                        "🔇"
+                                    } else if pct < 80 {
+                                        "🔉"
+                                    } else {
+                                        "🔊"
+                                    };
+
+                                    if ui
+                                        .add_enabled(
+                                            track.enabled,
+                                            egui::Button::new(RichText::new(icon).size(11.5))
+                                                .frame(false)
+                                                .min_size(Vec2::new(18.0, 18.0)),
+                                        )
+                                        .on_hover_text("Click to toggle Mute (0% / 100%)")
+                                        .clicked()
+                                    {
+                                        track.volume = if track.volume > 0.01 { 0.0 } else { 1.0 };
+                                        pct = (track.volume * 100.0).round() as i32;
+                                        volume_changed = true;
                                     }
 
-                                    ui.separator();
-                                    ui.label(RichText::new("── HARDWARE INPUTS ──").size(10.0).color(Color32::from_rgb(156, 163, 175)));
-                                    for dev in audio_device_items.iter().filter(|d| d.device_type == DeviceType::AudioInput) {
-                                        let is_sel = track.enabled && track.device_id == dev.id;
-                                        if ui.selectable_label(is_sel, dev.display_label(has_loopback)).clicked() {
-                                            track.enabled = true;
-                                            track.device_id = dev.id.clone();
-                                            track.device_index = dev.av_index.unwrap_or(0);
-                                            track.name = dev.name.clone();
-                                            audio_changed = true;
-                                        }
+                                    ui.spacing_mut().slider_width = 96.0;
+                                    let db_str = if track.volume <= 0.001 {
+                                        "-∞ dB".to_string()
+                                    } else {
+                                        format!("{:+.1} dB", 20.0 * track.volume.log10())
+                                    };
+                                    let slider_resp = ui
+                                        .add_enabled(
+                                            track.enabled,
+                                            egui::Slider::new(&mut pct, 0..=200).show_value(false),
+                                        )
+                                        .on_hover_text(format!(
+                                            "Track {} Gain / Volume: {}% ({})\nDouble-click to reset to 100% (0.0 dB)",
+                                            i + 1,
+                                            pct,
+                                            db_str
+                                        ));
+
+                                    if slider_resp.double_clicked() {
+                                        pct = 100;
+                                        track.volume = 1.0;
+                                        volume_changed = true;
+                                    } else if slider_resp.changed() {
+                                        track.volume = (pct as f32) / 100.0;
+                                        volume_changed = true;
                                     }
 
-                                    ui.separator();
-                                    ui.label(RichText::new("── AUDIO OUTPUTS ──").size(10.0).color(Color32::from_rgb(156, 163, 175)));
-                                    for dev in audio_device_items.iter().filter(|d| d.device_type == DeviceType::AudioOutput) {
-                                        let is_sel = track.enabled && track.device_id == dev.id;
-                                        if ui.selectable_label(is_sel, dev.display_label(has_loopback)).clicked() {
-                                            track.enabled = true;
-                                            track.device_id = dev.id.clone();
-                                            track.device_index = dev.av_index.unwrap_or(0);
-                                            track.name = dev.name.clone();
-                                            audio_changed = true;
-                                        }
-                                    }
-                                });
+                                    ui.label(
+                                        RichText::new(format!("{:>3}%", pct))
+                                            .font(FontId::new(11.0, FontFamily::Monospace))
+                                            .color(if track.enabled {
+                                                Color32::from_rgb(212, 212, 216)
+                                            } else {
+                                                Color32::from_rgb(113, 113, 122)
+                                            }),
+                                    );
+                                },
+                            );
 
-                            ui.add_space(8.0);
+                            ui.add_space(6.0);
 
-                            // Multi-Color Segmented VU Meter (Full Remaining Width)
+                            // 4. Dual Stereo (Left / Right) Multi-Color Segmented VU Meter (Identical Remaining Width)
                             let meter_width = ui.available_width().max(80.0);
-                            draw_vu_meter(ui, self.audio_levels[i], track.enabled, meter_width);
+                            draw_stereo_vu_meter(ui, self.audio_levels[i], track.enabled, meter_width);
                         });
 
                         if i < 4 {
@@ -1754,6 +2062,8 @@ impl eframe::App for MultiRecordingApp {
 
             if audio_changed {
                 self.sync_audio_monitors();
+                let _ = self.config.save_to_file(&self.config_path);
+            } else if volume_changed {
                 let _ = self.config.save_to_file(&self.config_path);
             }
         });
@@ -2047,11 +2357,23 @@ impl MultiRecordingApp {
                         }
                     });
 
+                    // --- Row 6: Recording Engine Performance & Overhead ---
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("🚀 Performance:").strong().color(Color32::from_rgb(244, 244, 245)));
+
+                        if ui.checkbox(
+                            &mut self.config.enable_recording_preview,
+                            "Live Video Preview in GUI during Recording (uncheck for Ultra Performance)"
+                        ).changed() {
+                            let _ = self.config.save_to_file(&self.config_path);
+                        }
+                    });
+
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(8.0);
 
-                    // --- Row 6: Hardware & System Audio Driver ---
+                    // --- Row 7: Hardware & System Audio Driver ---
                     ui.horizontal(|ui| {
                         #[cfg(target_os = "macos")]
                         {

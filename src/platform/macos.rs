@@ -140,7 +140,7 @@ impl MacOSPlatform {
             input,
             "-vn".to_string(),
             "-ac".to_string(),
-            "1".to_string(),
+            "2".to_string(),
             "-ar".to_string(),
             "8000".to_string(),
             "-f".to_string(),
@@ -408,12 +408,14 @@ mod tests {
                 name: "Mic".to_string(),
                 device_index: 0,
                 device_id: "in:0".to_string(),
+                volume: 1.0,
             },
             AudioTrackConfig {
                 enabled: true,
                 name: "Desktop".to_string(),
                 device_index: 1,
                 device_id: "in:1".to_string(),
+                volume: 1.0,
             },
         ];
         let args = mac.build_recording_input_args("0", 60, &tracks);
@@ -453,7 +455,7 @@ mod tests {
         assert_eq!(
             args,
             vec![
-                "-f", "avfoundation", "-i", "none:0", "-vn", "-ac", "1", "-ar", "8000", "-f",
+                "-f", "avfoundation", "-i", "none:0", "-vn", "-ac", "2", "-ar", "8000", "-f",
                 "f32le", "pipe:1"
             ]
         );

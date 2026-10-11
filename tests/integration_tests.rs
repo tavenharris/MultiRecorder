@@ -42,30 +42,35 @@ fn test_config_custom_file_operations() {
             name: "Game Audio".to_string(),
             device_index: 0,
             device_id: "in:0".to_string(),
+            volume: 1.0,
         },
         AudioTrackConfig {
             enabled: true,
             name: "Microphone".to_string(),
             device_index: 1,
             device_id: "in:1".to_string(),
+            volume: 1.25,
         },
         AudioTrackConfig {
             enabled: true,
             name: "Discord".to_string(),
             device_index: 2,
             device_id: "in:2".to_string(),
+            volume: 0.8,
         },
         AudioTrackConfig {
             enabled: false,
             name: "Music".to_string(),
             device_index: 0,
             device_id: "none".to_string(),
+            volume: 1.0,
         },
         AudioTrackConfig {
             enabled: false,
             name: "Aux".to_string(),
             device_index: 0,
             device_id: "none".to_string(),
+            volume: 1.0,
         },
     ];
 
@@ -83,6 +88,8 @@ fn test_config_custom_file_operations() {
     assert_eq!(loaded.sources[0].encoder, "hevc_videotoolbox");
     assert_eq!(loaded.audio_tracks.len(), 5);
     assert_eq!(loaded.audio_tracks[2].name, "Discord");
+    assert!((loaded.audio_tracks[1].volume - 1.25).abs() < 0.001);
+    assert!((loaded.audio_tracks[2].volume - 0.8).abs() < 0.001);
     assert_eq!(loaded.clip_intervals, vec![30, 60, 300, 1200]);
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -104,6 +111,16 @@ fn test_clip_intervals_and_formatting() {
     assert_eq!(MultiRecordingApp::format_interval_label(3600), "1h");
     assert_eq!(MultiRecordingApp::format_interval_label(90), "1m 30s");
     assert_eq!(MultiRecordingApp::format_interval_label(7200), "2h");
+
+    // Verify fixed-length audio device label formatting produces identical character length
+    let short_lbl = MultiRecordingApp::format_fixed_audio_label("None", 24);
+    let long_lbl = MultiRecordingApp::format_fixed_audio_label(
+        "🔊 [Output] Taven's AirPods Pro (via Loopback)",
+        24,
+    );
+    assert_eq!(short_lbl.chars().count(), 24);
+    assert_eq!(long_lbl.chars().count(), 24);
+    assert!(long_lbl.ends_with('…'));
 }
 
 #[test]
@@ -315,12 +332,14 @@ fn test_cross_platform_hal_command_generation() {
             name: "Microphone".to_string(),
             device_index: 0,
             device_id: "in:0".to_string(),
+            volume: 1.0,
         },
         AudioTrackConfig {
             enabled: true,
             name: "Desktop Audio".to_string(),
             device_index: 1,
             device_id: "wasapi".to_string(),
+            volume: 1.0,
         },
     ];
 
@@ -361,16 +380,19 @@ fn test_audio_track_monitor_lifecycle() {
     assert_eq!(monitor.device_identifier(), "wasapi");
     let peak = monitor.get_peak();
     assert!((0.0..=1.0).contains(&peak));
+    let (left, right) = monitor.get_peaks();
+    assert!((0.0..=1.0).contains(&left));
+    assert!((0.0..=1.0).contains(&right));
     monitor.stop();
 
     #[cfg(target_os = "windows")]
     {
         let mut mic_mon = AudioTrackMonitor::new("Microphone (Razer BlackShark V2 X USB)");
-        let _ = mic_mon.get_peak();
+        let _ = mic_mon.get_peaks();
         mic_mon.stop();
 
         let mut out_mon = AudioTrackMonitor::new("ED270R M (NVIDIA High Definition Audio)");
-        let _ = out_mon.get_peak();
+        let _ = out_mon.get_peaks();
         out_mon.stop();
     }
 }
@@ -500,18 +522,21 @@ fn test_multitrack_audio_preserved_in_remuxed_mp4() {
             name: "Speakers (Razer BlackShark V2 X USB) (Default Output)".to_string(),
             device_index: 0,
             device_id: "Speakers (Razer BlackShark V2 X USB)".to_string(),
+            volume: 1.0,
         },
         AudioTrackConfig {
             enabled: true,
             name: "Microphone (Razer BlackShark V2 X USB)".to_string(),
             device_index: 0,
             device_id: "Microphone (Razer BlackShark V2 X USB)".to_string(),
+            volume: 1.0,
         },
         AudioTrackConfig {
             enabled: true,
             name: "Discord".to_string(),
             device_index: 0,
             device_id: "Discord".to_string(),
+            volume: 1.0,
         },
     ];
 
