@@ -5,6 +5,7 @@ mod platform;
 mod recorder;
 mod remuxer;
 mod ring_buffer;
+mod tui;
 mod ui;
 
 use anyhow::Result;
@@ -35,6 +36,12 @@ enum Commands {
         config: PathBuf,
     },
 
+    /// Launch the interactive Terminal User Interface (TUI) with live VU meters & keybinds
+    Tui {
+        #[arg(short, long, default_value = "config.toml")]
+        config: PathBuf,
+    },
+
     /// List all available video capture devices (capture cards, webcams) and audio inputs
     Devices,
 
@@ -44,7 +51,7 @@ enum Commands {
         path: PathBuf,
     },
 
-    /// Start the continuous multi-source recording engine in terminal mode
+    /// Start the interactive Terminal User Interface (TUI) recording & flashback studio
     Run {
         #[arg(short, long, default_value = "config.toml")]
         config: PathBuf,
@@ -66,14 +73,20 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     #[cfg(target_os = "windows")]
     crate::platform::windows::ensure_ffmpeg_in_path();
 
     let cli = Cli::parse();
+    let command = cli.command.unwrap_or(Commands::Gui {
+        config: PathBuf::from("config.toml"),
+    });
 
-    match cli.command.unwrap_or(Commands::Gui { config: PathBuf::from("config.toml") }) {
+    // Only emit tracing logs to stdout when not in full-screen TUI mode
+    if !matches!(command, Commands::Tui { .. } | Commands::Run { .. }) {
+        tracing_subscriber::fmt::init();
+    }
+
+    match command {
         Commands::Gui { config: config_path } => {
             let icon_bytes = include_bytes!("../MultiRecorder.png");
             set_macos_dock_icon(icon_bytes);
@@ -159,33 +172,18 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Run { config: config_path } => {
+        Commands::Tui { config: config_path } | Commands::Run { config: config_path } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
-                let mut cfg = if config_path.exists() {
+                let cfg = if config_path.exists() {
                     Config::load_from_file(&config_path)?
                 } else {
-                    println!(
-                        "{} Config file not found at {:?}. Generating default...",
-                        "⚠".yellow(),
-                        config_path
-                    );
                     let default_cfg = Config::default();
                     default_cfg.save_to_file(&config_path)?;
                     default_cfg
                 };
 
-                if let Ok(devices) = DeviceManager::list_devices() {
-                    let fixes = cfg.sanitize_for_platform(&devices);
-                    if !fixes.is_empty() {
-                        for fix in &fixes {
-                            tracing::info!("Startup hardware/OS compatibility auto-heal: {}", fix);
-                        }
-                        let _ = cfg.save_to_file(&config_path);
-                    }
-                }
-
-                let mut engine = RecordingEngine::new(cfg);
+                let mut engine = RecordingEngine::with_config_path(cfg, config_path);
                 engine.run().await
             })?;
         }

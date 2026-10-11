@@ -5,4 +5,5 @@ pub mod platform;
 pub mod recorder;
 pub mod remuxer;
 pub mod ring_buffer;
+pub mod tui;
 pub mod ui;
