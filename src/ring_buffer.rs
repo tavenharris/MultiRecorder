@@ -45,18 +45,18 @@ impl RingBufferManager {
         }
 
         let prefix = format!("{}_", self.source_name);
-        for entry in fs::read_dir(&self.buffer_dir)? {
-            let entry = entry?;
+        for entry in fs::read_dir(&self.buffer_dir)?.flatten() {
             let path = entry.path();
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                 if file_name.starts_with(&prefix) && file_name.ends_with(".mp4") {
-                    let metadata = entry.metadata()?;
-                    let created_at = metadata.modified().unwrap_or(SystemTime::now());
-                    segments.push(SegmentInfo {
-                        path,
-                        created_at,
-                        size_bytes: metadata.len(),
-                    });
+                    if let Ok(metadata) = entry.metadata() {
+                        let created_at = metadata.modified().unwrap_or(SystemTime::now());
+                        segments.push(SegmentInfo {
+                            path,
+                            created_at,
+                            size_bytes: metadata.len(),
+                        });
+                    }
                 }
             }
         }

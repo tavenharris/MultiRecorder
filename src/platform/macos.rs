@@ -127,9 +127,7 @@ impl MacOSPlatform {
         let clean = audio_device_identifier
             .strip_prefix("in:")
             .unwrap_or(audio_device_identifier);
-        let input = if clean.starts_with("none:") {
-            clean.to_string()
-        } else if clean.contains(':') && !clean.starts_with("out:") {
+        let input = if clean.starts_with("none:") || (clean.contains(':') && !clean.starts_with("out:")) {
             clean.to_string()
         } else {
             let bare = clean.strip_prefix("out:").unwrap_or(clean);
@@ -262,16 +260,17 @@ pub fn parse_avfoundation_devices(output: &str) -> Result<Vec<Device>> {
     let mut devices = Vec::new();
     let mut current_type: Option<DeviceType> = None;
 
-    let video_header_re = Regex::new(r"AVFoundation video devices:")?;
-    let audio_header_re = Regex::new(r"AVFoundation audio devices:")?;
-    let device_re = Regex::new(r"\[(\d+)\]\s+(.+)$")?;
+    static DEVICE_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let device_re = DEVICE_RE.get_or_init(|| {
+        Regex::new(r"\[(\d+)\]\s+(.+)$").expect("valid AVFoundation device regex")
+    });
 
     for line in output.lines() {
         let line = line.trim();
-        if video_header_re.is_match(line) {
+        if line.contains("AVFoundation video devices:") {
             current_type = Some(DeviceType::Video);
             continue;
-        } else if audio_header_re.is_match(line) {
+        } else if line.contains("AVFoundation audio devices:") {
             current_type = Some(DeviceType::AudioInput);
             continue;
         }
@@ -342,8 +341,7 @@ pub fn list_output_devices(loopback_index: Option<usize>) -> Result<Vec<Device>>
                         .get("coreaudio_device_output")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    if out_channels > 0 && !seen_names.contains(name) {
-                        seen_names.insert(name.to_string());
+                    if out_channels > 0 && seen_names.insert(name) {
                         let idx = outputs.len();
                         outputs.push(Device {
                             id: format!("out:{}", name),

@@ -206,7 +206,7 @@ impl RecordingEngine {
             if segments.is_empty() {
                 println!(
                     "\r  ⚠ No buffered segments ready yet for stream [{}] (wait ~5s).",
-                    mgr.get_stats()?.segment_count
+                    mgr.source_name()
                 );
                 continue;
             }
@@ -259,7 +259,8 @@ impl RecordingEngine {
         for mgr in &self.managers {
             let stats = mgr.get_stats()?;
             println!(
-                "\r  Stream: count: {} segments | size: {:.1} MB | duration: ~{}s",
+                "\r  Stream [{}]: count: {} segments | size: {:.1} MB | duration: ~{}s",
+                mgr.source_name().yellow().bold(),
                 stats.segment_count,
                 stats.total_size_mb,
                 stats.estimated_duration_secs

@@ -289,6 +289,9 @@ impl WindowsPlatform {
     pub fn primary_display_resolution(&self) -> Option<String> {
         #[cfg(target_os = "windows")]
         {
+            // SAFETY: Safe Rust cannot directly query Win32 User32 APIs. `GetSystemMetrics`
+            // is a read-only query of primary display width (SM_CXSCREEN) and height (SM_CYSCREEN).
+            // It takes plain integral constants, performs no raw pointer dereferencing, and produces no side-effects.
             unsafe {
                 let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
                     windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
@@ -304,7 +307,13 @@ impl WindowsPlatform {
 
         // Fallback: query via PowerShell
         let ps_cmd = "[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width.ToString() + 'x' + [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height.ToString()";
-        if let Ok(output) = Command::new("powershell")
+        let mut ps = Command::new("powershell");
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            ps.creation_flags(0x08000000);
+        }
+        if let Ok(output) = ps
             .args(["-NoProfile", "-Command", ps_cmd])
             .output()
         {
@@ -390,6 +399,9 @@ impl WindowsPlatform {
             ]);
         }
 
+        // Query DirectShow audio hardware devices once upfront for all tracks
+        let dshow_audios = query_dshow_audio_devices();
+
         // Inputs 1..N: Enabled audio tracks
         for track in enabled_tracks {
             let id = &track.device_id;
@@ -435,7 +447,6 @@ impl WindowsPlatform {
                     "anullsrc=channel_layout=stereo:sample_rate=48000".to_string(),
                 ]);
             } else if let Ok(num) = clean_name.parse::<usize>() {
-                let dshow_audios = query_dshow_audio_devices();
                 if let Some(real_name) = dshow_audios.get(num) {
                     args.extend([
                         "-f".to_string(),
@@ -459,7 +470,6 @@ impl WindowsPlatform {
                     ]);
                 }
             } else {
-                let dshow_audios = query_dshow_audio_devices();
                 let is_output_name = clean_name.to_lowercase().contains("speaker")
                     || clean_name.to_lowercase().contains("output")
                     || clean_name.to_lowercase().contains("headphones")
@@ -737,7 +747,7 @@ pub fn start_wasapi_loopback_bridge(identifier: &str) -> Option<(u16, u32)> {
     let supported_config = dev.default_output_config().ok()?;
     let sample_format = supported_config.sample_format();
     let stream_config: cpal::StreamConfig = supported_config.into();
-    let sample_rate: u32 = stream_config.sample_rate.into();
+    let sample_rate = stream_config.sample_rate;
     let channels = (stream_config.channels as usize).max(1);
 
     let listener = TcpListener::bind("127.0.0.1:0").ok()?;
@@ -820,28 +830,40 @@ pub fn start_wasapi_loopback_bridge(identifier: &str) -> Option<(u16, u32)> {
                     )
                 }
                 cpal::SampleFormat::I16 => {
-                    let push = push_stereo_f32;
+                    let buf_i16 = Arc::clone(&audio_buf);
                     d.build_input_stream(
                         stream_config,
                         move |data: &[i16], _| {
-                            let converted: Vec<f32> =
-                                data.iter().map(|&s| s as f32 / 32768.0).collect();
-                            push(&converted);
+                            if let Ok(mut guard) = buf_i16.lock() {
+                                if guard.len() < (sample_rate as usize * 8) {
+                                    for frame in data.chunks(channels) {
+                                        let l = frame[0] as f32 / 32768.0;
+                                        let r = if channels > 1 { frame[1] as f32 / 32768.0 } else { l };
+                                        guard.extend_from_slice(&l.to_le_bytes());
+                                        guard.extend_from_slice(&r.to_le_bytes());
+                                    }
+                                }
+                            }
                         },
                         |_| {},
                         None,
                     )
                 }
                 cpal::SampleFormat::U16 => {
-                    let push = push_stereo_f32;
+                    let buf_u16 = Arc::clone(&audio_buf);
                     d.build_input_stream(
                         stream_config,
                         move |data: &[u16], _| {
-                            let converted: Vec<f32> = data
-                                .iter()
-                                .map(|&s| (s as f32 - 32768.0) / 32768.0)
-                                .collect();
-                            push(&converted);
+                            if let Ok(mut guard) = buf_u16.lock() {
+                                if guard.len() < (sample_rate as usize * 8) {
+                                    for frame in data.chunks(channels) {
+                                        let l = (frame[0] as f32 - 32768.0) / 32768.0;
+                                        let r = if channels > 1 { (frame[1] as f32 - 32768.0) / 32768.0 } else { l };
+                                        guard.extend_from_slice(&l.to_le_bytes());
+                                        guard.extend_from_slice(&r.to_le_bytes());
+                                    }
+                                }
+                            }
                         },
                         |_| {},
                         None,
@@ -864,6 +886,7 @@ pub fn start_wasapi_loopback_bridge(identifier: &str) -> Option<(u16, u32)> {
 
         let mut last_audio_instant = Instant::now();
         let silence_threshold = Duration::from_millis(25);
+        let zero_chunk = [0u8; 4096];
 
         loop {
             std::thread::sleep(Duration::from_millis(5));
@@ -896,8 +919,17 @@ pub fn start_wasapi_loopback_bridge(identifier: &str) -> Option<(u16, u32)> {
                     if silent_frames > 0 {
                         last_audio_instant +=
                             Duration::from_secs_f64(silent_frames as f64 / sample_rate as f64);
-                        let silent_bytes = vec![0u8; silent_frames * 8];
-                        if tcp_stream.write_all(&silent_bytes).is_err() {
+                        let mut remaining_bytes = silent_frames * 8;
+                        let mut write_err = false;
+                        while remaining_bytes > 0 {
+                            let to_write = remaining_bytes.min(zero_chunk.len());
+                            if tcp_stream.write_all(&zero_chunk[..to_write]).is_err() {
+                                write_err = true;
+                                break;
+                            }
+                            remaining_bytes -= to_write;
+                        }
+                        if write_err {
                             break;
                         }
                     }
@@ -945,7 +977,7 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
             for dev in outputs {
                 if let Ok(desc) = dev.description() {
                     let d_name = desc.name();
-                    if matches_name(&d_name, &clean_id_normalized) {
+                    if matches_name(d_name, &clean_id_normalized) {
                         target_device = Some(dev);
                         is_loopback = true;
                         break;
@@ -963,7 +995,7 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
             for dev in outputs {
                 if let Ok(desc) = dev.description() {
                     let d_name = desc.name();
-                    if matches_name(&d_name, &clean_id_normalized) {
+                    if matches_name(d_name, &clean_id_normalized) {
                         target_device = Some(dev);
                         is_loopback = true;
                         break;
@@ -978,7 +1010,7 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
                 for dev in inputs {
                     if let Ok(desc) = dev.description() {
                         let d_name = desc.name();
-                        if matches_name(&d_name, &clean_id_normalized) {
+                        if matches_name(d_name, &clean_id_normalized) {
                             target_device = Some(dev);
                             is_loopback = false;
                             break;
@@ -1083,7 +1115,7 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
 
 pub fn detect_best_windows_encoder() -> &'static str {
     static ENCODER: OnceLock<&'static str> = OnceLock::new();
-    *ENCODER.get_or_init(|| {
+    ENCODER.get_or_init(|| {
         ensure_ffmpeg_in_path();
         if let Ok(output) = Command::new("ffmpeg").args(["-encoders"]).output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1143,15 +1175,11 @@ pub fn parse_dshow_devices(output: &str) -> (Vec<String>, Vec<String>) {
             }
             if let Some(name) = extract_quoted_string(trimmed) {
                 match section {
-                    DeviceType::Video => {
-                        if !video_devices.contains(&name) {
-                            video_devices.push(name);
-                        }
+                    DeviceType::Video if !video_devices.contains(&name) => {
+                        video_devices.push(name);
                     }
-                    DeviceType::AudioInput => {
-                        if !audio_devices.contains(&name) {
-                            audio_devices.push(name);
-                        }
+                    DeviceType::AudioInput if !audio_devices.contains(&name) => {
+                        audio_devices.push(name);
                     }
                     _ => {}
                 }

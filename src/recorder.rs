@@ -148,7 +148,7 @@ impl PreviewStream {
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 let mut found = false;
-                for line in reader.lines().flatten() {
+                for line in reader.lines().map_while(Result::ok) {
                     if !found {
                         if let Some(fmt_str) = parse_detected_format(&line, default_fps, is_screen) {
                             if let Ok(mut lock) = fmt_arc.lock() {
@@ -433,7 +433,7 @@ impl StreamRecorder {
                 let reader = BufReader::new(stderr);
                 let mut file_out = File::create(&log_path).ok();
 
-                for line in reader.lines().flatten() {
+                for line in reader.lines().map_while(Result::ok) {
                     if let Some(f) = file_out.as_mut() {
                         let _ = writeln!(f, "{}", line);
                     }
@@ -488,10 +488,7 @@ impl StreamRecorder {
     #[allow(dead_code)]
     pub fn is_running(&mut self) -> bool {
         if let Some(child) = &mut self.child {
-            match child.try_wait() {
-                Ok(None) => true,
-                _ => false,
-            }
+            matches!(child.try_wait(), Ok(None))
         } else {
             false
         }

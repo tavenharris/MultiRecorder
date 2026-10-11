@@ -143,6 +143,7 @@ pub fn pick_folder() -> Option<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let ps_cmd = r#"
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -151,7 +152,9 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     Write-Output $dialog.SelectedPath
 }
 "#;
-        if let Ok(out) = std::process::Command::new("powershell")
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.creation_flags(0x08000000);
+        if let Ok(out) = cmd
             .args(["-NoProfile", "-Command", ps_cmd])
             .output()
         {

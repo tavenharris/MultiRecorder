@@ -543,7 +543,7 @@ impl MultiRecordingApp {
                         if in_fps >= 60 {
                             allowed_fps.push(60);
                         }
-                        if in_fps >= 50 && in_fps < 60 {
+                        if (50..60).contains(&in_fps) {
                             allowed_fps.push(50);
                         }
                         if in_fps >= 30 {
@@ -1224,7 +1224,7 @@ impl eframe::App for MultiRecordingApp {
                     self.audio_levels[i] = self.audio_levels[i] * 0.2 + peak * 0.8;
                 } else {
                     // Smooth broadcast decay
-                    self.audio_levels[i] = self.audio_levels[i] * 0.88;
+                    self.audio_levels[i] *= 0.88;
                 }
             } else {
                 self.audio_levels[i] = 0.0;
@@ -1876,11 +1876,11 @@ impl MultiRecordingApp {
                         for &b in &["8M", "12M", "15M", "20M"] {
                             let is_cur = cur_b2 == b;
                             let btn_color = if is_cur { Color32::from_rgb(16, 185, 129) } else { Color32::from_rgb(45, 45, 52) };
-                            if ui.add(egui::Button::new(RichText::new(b).color(Color32::WHITE).size(10.0)).fill(btn_color)).clicked() {
-                                if self.config.sources.len() > 1 {
-                                    self.config.sources[1].video_bitrate = b.to_string();
-                                    let _ = self.config.save_to_file(&self.config_path);
-                                }
+                            if ui.add(egui::Button::new(RichText::new(b).color(Color32::WHITE).size(10.0)).fill(btn_color)).clicked()
+                                && self.config.sources.len() > 1
+                            {
+                                self.config.sources[1].video_bitrate = b.to_string();
+                                let _ = self.config.save_to_file(&self.config_path);
                             }
                         }
 

@@ -182,6 +182,7 @@ impl Config {
     /// 3. Video source device existence & role mapping (Screen/Desktop for Stream 1, Camera for Stream 2)
     /// 4. Framerate & resolution compatibility against hardware capabilities
     /// 5. Audio input/output device existence, AVFoundation index changes, loopback routing, and deduplication
+    ///
     /// Returns a list of human-readable adjustments made.
     pub fn sanitize_for_platform(&mut self, devices: &[crate::devices::Device]) -> Vec<String> {
         use crate::devices::{Device, DeviceType};

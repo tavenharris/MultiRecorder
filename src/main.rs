@@ -229,10 +229,17 @@ pub fn set_macos_dock_icon(png_bytes: &[u8]) {
         fn objc_msgSend() -> ();
     }
 
+    // SAFETY: Safe Rust cannot directly invoke macOS AppKit Objective-C runtime APIs
+    // to configure the process dock icon for standalone CLI executable launches.
+    // Soundness invariants maintained:
+    // 1. `objc_getClass` lookups are null-checked for NSData, NSImage, and NSApplication before use.
+    // 2. `objc_msgSend` is transmuted to exact C-ABI function pointer signatures matching method types.
+    // 3. Allocated and initialized Objective-C object references are verified non-null before chaining.
+    // 4. Memory buffer passed to `dataWithBytes:length:` is guaranteed valid for the call duration by `png_bytes`.
     unsafe {
-        let cls_nsdata = objc_getClass(b"NSData\0".as_ptr() as *const _);
-        let cls_nsimage = objc_getClass(b"NSImage\0".as_ptr() as *const _);
-        let cls_nsapp = objc_getClass(b"NSApplication\0".as_ptr() as *const _);
+        let cls_nsdata = objc_getClass(c"NSData".as_ptr());
+        let cls_nsimage = objc_getClass(c"NSImage".as_ptr());
+        let cls_nsapp = objc_getClass(c"NSApplication".as_ptr());
 
         if cls_nsdata.is_null() || cls_nsimage.is_null() || cls_nsapp.is_null() {
             return;
@@ -249,11 +256,11 @@ pub fn set_macos_dock_icon(png_bytes: &[u8]) {
         let sel_set_icon: unsafe extern "C" fn(Id, Sel, Id) -> () =
             std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
 
-        let sel_data = sel_registerName(b"dataWithBytes:length:\0".as_ptr() as *const _);
-        let sel_alloc_id = sel_registerName(b"alloc\0".as_ptr() as *const _);
-        let sel_init_id = sel_registerName(b"initWithData:\0".as_ptr() as *const _);
-        let sel_shared_id = sel_registerName(b"sharedApplication\0".as_ptr() as *const _);
-        let sel_set_icon_id = sel_registerName(b"setApplicationIconImage:\0".as_ptr() as *const _);
+        let sel_data = sel_registerName(c"dataWithBytes:length:".as_ptr());
+        let sel_alloc_id = sel_registerName(c"alloc".as_ptr());
+        let sel_init_id = sel_registerName(c"initWithData:".as_ptr());
+        let sel_shared_id = sel_registerName(c"sharedApplication".as_ptr());
+        let sel_set_icon_id = sel_registerName(c"setApplicationIconImage:".as_ptr());
 
         let data = sel_data_with_bytes(cls_nsdata, sel_data, png_bytes.as_ptr() as *const c_void, png_bytes.len());
         if data.is_null() {

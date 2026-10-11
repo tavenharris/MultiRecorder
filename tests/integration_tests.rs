@@ -360,7 +360,7 @@ fn test_audio_track_monitor_lifecycle() {
     let mut monitor = AudioTrackMonitor::new("wasapi");
     assert_eq!(monitor.device_identifier(), "wasapi");
     let peak = monitor.get_peak();
-    assert!(peak >= 0.0 && peak <= 1.0);
+    assert!((0.0..=1.0).contains(&peak));
     monitor.stop();
 
     #[cfg(target_os = "windows")]
