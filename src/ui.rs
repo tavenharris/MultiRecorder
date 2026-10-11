@@ -42,9 +42,7 @@ pub struct MultiRecordingApp {
     preview_stream_2: Option<PreviewStream>,
     preview_texture_1: Option<egui::TextureHandle>,
     preview_texture_2: Option<egui::TextureHandle>,
-    #[allow(dead_code)]
     last_preview_seq_1: u64,
-    #[allow(dead_code)]
     last_preview_seq_2: u64,
 
     // Real Hardware Audio Monitors
@@ -1085,7 +1083,7 @@ impl eframe::App for MultiRecordingApp {
             Self::apply_flat_theme(ctx);
         }
 
-        ctx.request_repaint_after(Duration::from_millis(60));
+        ctx.request_repaint_after(Duration::from_millis(16));
 
         // Background Ring Buffer Eviction (Only active during Flashback mode!)
         if self.is_recording && self.recording_mode == Some(RecordingMode::Flashback) && self.last_eviction.elapsed() >= Duration::from_secs(5) {
@@ -1111,41 +1109,69 @@ impl eframe::App for MultiRecordingApp {
             }
         }
 
-        // 1. Process Video Preview Frames into Textures
-        let frame_1_bytes = if self.is_recording {
-            self.recorders.first().and_then(|r| r.get_latest_frame())
+        // 1. Process Video Preview Frames into Textures (only when a new frame arrives)
+        let cur_seq_1 = if self.is_recording {
+            self.recorders.first().map(|r| r.frame_seq()).unwrap_or(0)
         } else {
-            self.preview_stream_1.as_ref().and_then(|p| p.get_latest_frame())
+            self.preview_stream_1.as_ref().map(|p| p.frame_seq()).unwrap_or(0)
         };
 
-        if let Some(bytes) = frame_1_bytes {
-            if bytes.len() == 320 * 180 * 4 {
-                let color_img = egui::ColorImage::from_rgba_unmultiplied([320, 180], &bytes);
-                if let Some(tex) = &mut self.preview_texture_1 {
-                    tex.set(color_img, egui::TextureOptions::LINEAR);
-                } else {
-                    self.preview_texture_1 = Some(ctx.load_texture("preview_1", color_img, egui::TextureOptions::LINEAR));
+        if cur_seq_1 != self.last_preview_seq_1 || self.preview_texture_1.is_none() {
+            let frame_1_bytes = if self.is_recording {
+                self.recorders.first().and_then(|r| r.get_latest_frame())
+            } else {
+                self.preview_stream_1.as_ref().and_then(|p| p.get_latest_frame())
+            };
+
+            if let Some(bytes) = frame_1_bytes {
+                if bytes.len() == crate::recorder::PREVIEW_FRAME_SIZE {
+                    let color_img = egui::ColorImage::from_rgba_unmultiplied(
+                        [crate::recorder::PREVIEW_WIDTH, crate::recorder::PREVIEW_HEIGHT],
+                        &bytes,
+                    );
+                    if let Some(tex) = &mut self.preview_texture_1 {
+                        tex.set(color_img, egui::TextureOptions::LINEAR);
+                    } else {
+                        self.preview_texture_1 = Some(ctx.load_texture("preview_1", color_img, egui::TextureOptions::LINEAR));
+                    }
+                    self.last_preview_seq_1 = cur_seq_1;
                 }
             }
         }
 
-        let frame_2_bytes = if self.is_recording {
+        let cur_seq_2 = if self.is_recording {
             if self.recorders.len() > 1 {
-                self.recorders[1].get_latest_frame()
+                self.recorders[1].frame_seq()
             } else {
-                None
+                0
             }
         } else {
-            self.preview_stream_2.as_ref().and_then(|p| p.get_latest_frame())
+            self.preview_stream_2.as_ref().map(|p| p.frame_seq()).unwrap_or(0)
         };
 
-        if let Some(bytes) = frame_2_bytes {
-            if bytes.len() == 320 * 180 * 4 {
-                let color_img = egui::ColorImage::from_rgba_unmultiplied([320, 180], &bytes);
-                if let Some(tex) = &mut self.preview_texture_2 {
-                    tex.set(color_img, egui::TextureOptions::LINEAR);
+        if cur_seq_2 != self.last_preview_seq_2 || self.preview_texture_2.is_none() {
+            let frame_2_bytes = if self.is_recording {
+                if self.recorders.len() > 1 {
+                    self.recorders[1].get_latest_frame()
                 } else {
-                    self.preview_texture_2 = Some(ctx.load_texture("preview_2", color_img, egui::TextureOptions::LINEAR));
+                    None
+                }
+            } else {
+                self.preview_stream_2.as_ref().and_then(|p| p.get_latest_frame())
+            };
+
+            if let Some(bytes) = frame_2_bytes {
+                if bytes.len() == crate::recorder::PREVIEW_FRAME_SIZE {
+                    let color_img = egui::ColorImage::from_rgba_unmultiplied(
+                        [crate::recorder::PREVIEW_WIDTH, crate::recorder::PREVIEW_HEIGHT],
+                        &bytes,
+                    );
+                    if let Some(tex) = &mut self.preview_texture_2 {
+                        tex.set(color_img, egui::TextureOptions::LINEAR);
+                    } else {
+                        self.preview_texture_2 = Some(ctx.load_texture("preview_2", color_img, egui::TextureOptions::LINEAR));
+                    }
+                    self.last_preview_seq_2 = cur_seq_2;
                 }
             }
         }

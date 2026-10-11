@@ -10,6 +10,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+pub const PREVIEW_WIDTH: usize = 960;
+pub const PREVIEW_HEIGHT: usize = 540;
+pub const PREVIEW_FRAME_SIZE: usize = PREVIEW_WIDTH * PREVIEW_HEIGHT * 4;
+pub const PREVIEW_FPS: u32 = 30;
+
 static RES_REGEX: OnceLock<regex::Regex> = OnceLock::new();
 static FPS_REGEX: OnceLock<regex::Regex> = OnceLock::new();
 
@@ -90,12 +95,17 @@ impl PreviewStream {
 
     pub fn start(&mut self) -> Result<()> {
         let mut cmd = Command::new("ffmpeg");
-        cmd.arg("-y");
+        cmd.args(["-y", "-fflags", "nobuffer", "-flags", "low_delay"]);
         cmd.args(crate::platform::CurrentPlatform.build_preview_input_args(&self.video_device));
+        let vf = format!(
+            "scale={}:{}:flags=fast_bilinear:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,fps={}",
+            PREVIEW_WIDTH, PREVIEW_HEIGHT, PREVIEW_WIDTH, PREVIEW_HEIGHT, PREVIEW_FPS
+        );
         cmd.args([
-            "-vf", "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,fps=15",
+            "-vf", &vf,
             "-f", "rawvideo",
             "-pix_fmt", "rgba",
+            "-flush_packets", "1",
             "pipe:1",
         ]);
         cmd.stdin(Stdio::piped());
@@ -111,12 +121,12 @@ impl PreviewStream {
             let frame_seq = Arc::clone(&self.frame_seq);
             thread::spawn(move || {
                 use std::io::Read;
-                let mut reader = BufReader::with_capacity(320 * 180 * 4 * 2, stdout);
-                let mut buf = vec![0u8; 320 * 180 * 4];
+                let mut reader = BufReader::with_capacity(PREVIEW_FRAME_SIZE, stdout);
+                let mut buf = vec![0u8; PREVIEW_FRAME_SIZE];
                 while reader.read_exact(&mut buf).is_ok() {
                     if let Ok(mut lock) = frame_arc.lock() {
                         if let Some(existing) = lock.as_mut() {
-                            existing.copy_from_slice(&buf);
+                            std::mem::swap(existing, &mut buf);
                         } else {
                             *lock = Some(buf.clone());
                         }
@@ -152,7 +162,6 @@ impl PreviewStream {
         self.latest_frame.lock().ok().and_then(|f| f.clone())
     }
 
-    #[allow(dead_code)]
     pub fn frame_seq(&self) -> u64 {
         self.frame_seq.load(Ordering::Acquire)
     }
@@ -232,7 +241,6 @@ impl StreamRecorder {
         self.latest_frame.lock().ok().and_then(|f| f.clone())
     }
 
-    #[allow(dead_code)]
     pub fn frame_seq(&self) -> u64 {
         self.frame_seq.load(Ordering::Acquire)
     }
@@ -276,23 +284,26 @@ impl StreamRecorder {
                 format!(
                     "[0:v]split=2[rec_raw][prev_raw];\
                      [rec_raw]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,fps={}[rec];\
-                     [prev_raw]scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,fps=15[prev]",
-                    w, h, w, h, fps
+                     [prev_raw]scale={}:{}:flags=fast_bilinear:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,fps={}[prev]",
+                    w, h, w, h, fps,
+                    PREVIEW_WIDTH, PREVIEW_HEIGHT, PREVIEW_WIDTH, PREVIEW_HEIGHT, PREVIEW_FPS
                 )
             } else {
                 format!(
                     "[0:v]split=2[rec_raw][prev_raw];\
                      [rec_raw]fps={}[rec];\
-                     [prev_raw]scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,fps=15[prev]",
-                    fps
+                     [prev_raw]scale={}:{}:flags=fast_bilinear:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,fps={}[prev]",
+                    fps,
+                    PREVIEW_WIDTH, PREVIEW_HEIGHT, PREVIEW_WIDTH, PREVIEW_HEIGHT, PREVIEW_FPS
                 )
             }
         } else {
             format!(
                 "[0:v]split=2[rec_raw][prev_raw];\
                  [rec_raw]fps={}[rec];\
-                 [prev_raw]scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,fps=15[prev]",
-                fps
+                 [prev_raw]scale={}:{}:flags=fast_bilinear:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,fps={}[prev]",
+                fps,
+                PREVIEW_WIDTH, PREVIEW_HEIGHT, PREVIEW_WIDTH, PREVIEW_HEIGHT, PREVIEW_FPS
             )
         };
 
@@ -345,11 +356,12 @@ impl StreamRecorder {
             &segment_pattern,
         ]);
 
-        // Output 1: Live Preview Pipe (RGBA 320x180 rawvideo to stdout)
+        // Output 1: Live Preview Pipe (RGBA rawvideo to stdout)
         cmd.args([
             "-map", "[prev]",
             "-f", "rawvideo",
             "-pix_fmt", "rgba",
+            "-flush_packets", "1",
             "pipe:1",
         ]);
 
@@ -375,12 +387,12 @@ impl StreamRecorder {
             let frame_seq = Arc::clone(&self.frame_seq);
             thread::spawn(move || {
                 use std::io::Read;
-                let mut reader = BufReader::with_capacity(320 * 180 * 4 * 2, stdout);
-                let mut buf = vec![0u8; 320 * 180 * 4];
+                let mut reader = BufReader::with_capacity(PREVIEW_FRAME_SIZE, stdout);
+                let mut buf = vec![0u8; PREVIEW_FRAME_SIZE];
                 while reader.read_exact(&mut buf).is_ok() {
                     if let Ok(mut lock) = frame_arc.lock() {
                         if let Some(existing) = lock.as_mut() {
-                            existing.copy_from_slice(&buf);
+                            std::mem::swap(existing, &mut buf);
                         } else {
                             *lock = Some(buf.clone());
                         }
