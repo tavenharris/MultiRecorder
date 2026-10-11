@@ -1555,35 +1555,6 @@ impl eframe::App for MultiRecordingApp {
                                 "0 Mb/s".to_string()
                             };
                             ui.label(RichText::new(format!("{}  {}", bitrate_str, size_str)).font(FontId::new(15.0, FontFamily::Proportional)).color(Color32::from_rgb(212, 212, 216)));
-
-                            if self.is_recording {
-                                ui.add_space(12.0);
-                                if let Some(lag) = self.recorders.iter().find(|r| r.get_health().is_lagging) {
-                                    let h = lag.get_health();
-                                    ui.label(
-                                        RichText::new(format!("⚠️ BOTTLENECK: [{}] {:.1} fps ({:.2}x)", lag.source_name(), h.current_fps, h.speed_ratio))
-                                            .font(FontId::new(13.0, FontFamily::Proportional))
-                                            .color(Color32::from_rgb(244, 63, 94))
-                                            .strong()
-                                    ).on_hover_text("Bottleneck detected! Encoding is slower than real-time (speed < 1.0x).\nTo fix:\n1. Lower resolution (e.g. to 1080p or 720p)\n2. Lower framerate to 30 fps\n3. In Settings, disable 'Live Preview while Recording' for maximum performance\n4. Close CPU/GPU-heavy background apps");
-                                } else if let Some(rec) = self.recorders.first() {
-                                    let h = rec.get_health();
-                                    if h.frames_processed > 0 {
-                                        ui.label(
-                                            RichText::new(format!("⚡ {:.1} fps ({:.2}x) Real-time", h.current_fps, h.speed_ratio))
-                                                .font(FontId::new(13.0, FontFamily::Proportional))
-                                                .color(Color32::from_rgb(16, 185, 129))
-                                                .strong()
-                                        ).on_hover_text("Encoding performance is smooth and in real-time (speed >= 1.0x). Zero frames dropped.");
-                                    } else {
-                                        ui.label(
-                                            RichText::new("⚡ Initializing Encoder...")
-                                                .font(FontId::new(13.0, FontFamily::Proportional))
-                                                .color(Color32::from_rgb(161, 161, 170))
-                                        );
-                                    }
-                                }
-                            }
                         });
                     });
                 });
@@ -1612,94 +1583,6 @@ impl eframe::App for MultiRecordingApp {
             }
 
             ui.add_space(4.0);
-
-            // ==========================================
-            // REAL-TIME BOTTLENECK & STREAM HEALTH MONITOR
-            // ==========================================
-            if self.is_recording {
-                let has_bottleneck = self.recorders.iter().any(|r| r.get_health().is_lagging);
-                let (border, fill) = if has_bottleneck {
-                    (Color32::from_rgb(225, 29, 72), Color32::from_rgb(38, 14, 20))
-                } else {
-                    (Color32::from_rgb(16, 185, 129), Color32::from_rgb(12, 28, 22))
-                };
-
-                let mode_str = match self.recording_mode {
-                    Some(RecordingMode::Flashback) => "Flashback Ring Buffer",
-                    Some(RecordingMode::Continuous) => "Continuous Recording",
-                    None => "Recording",
-                };
-
-                egui::Frame::none()
-                    .fill(fill)
-                    .stroke(Stroke::new(1.0_f32, border))
-                    .rounding(Rounding::same(6.0))
-                    .inner_margin(Margin::symmetric(14.0, 8.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if has_bottleneck {
-                                ui.label(
-                                    RichText::new("⚠️ ENCODER BOTTLENECK DETECTED")
-                                        .font(FontId::new(12.0, FontFamily::Proportional))
-                                        .color(Color32::from_rgb(244, 63, 94))
-                                        .strong()
-                                );
-                            } else {
-                                ui.label(
-                                    RichText::new("⚡ STREAM HEALTH & BOTTLENECK MONITOR")
-                                        .font(FontId::new(12.0, FontFamily::Proportional))
-                                        .color(Color32::from_rgb(16, 185, 129))
-                                        .strong()
-                                );
-                            }
-
-                            ui.separator();
-                            ui.label(RichText::new(mode_str).size(11.5).color(Color32::from_rgb(161, 161, 170)));
-
-                            for rec in &self.recorders {
-                                ui.separator();
-                                let h = rec.get_health();
-                                if h.frames_processed > 0 {
-                                    let (col, status_text) = if h.is_lagging {
-                                        (Color32::from_rgb(244, 63, 94), "⚠️ Dropping frames")
-                                    } else {
-                                        (Color32::from_rgb(52, 211, 153), "Smooth (Real-time)")
-                                    };
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "[{}] {:.1} fps • {:.2}x speed • {}",
-                                            rec.source_name(),
-                                            h.current_fps,
-                                            h.speed_ratio,
-                                            status_text
-                                        ))
-                                        .size(11.5)
-                                        .color(col)
-                                        .strong()
-                                    );
-                                } else {
-                                    ui.label(
-                                        RichText::new(format!("[{}] Initializing encoder...", rec.source_name()))
-                                            .size(11.5)
-                                            .color(Color32::from_rgb(161, 161, 170))
-                                    );
-                                }
-                            }
-
-                            if has_bottleneck {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(
-                                        RichText::new("Tip: Lower output resolution or disable Live Preview in Settings")
-                                            .size(11.0)
-                                            .color(Color32::from_rgb(251, 113, 133))
-                                    );
-                                });
-                            }
-                        });
-                    });
-
-                ui.add_space(8.0);
-            }
 
             // ==========================================
             // VIDEO SECTION (Matching User Sketch)
