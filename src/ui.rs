@@ -1475,7 +1475,7 @@ impl eframe::App for MultiRecordingApp {
                         .show(ui, |ui| {
                             // Header + Device Selector
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("Video preview 1").strong().color(Color32::from_rgb(244, 244, 245)));
+                                ui.label(RichText::new("Gameplay").strong().color(Color32::from_rgb(244, 244, 245)));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let cur_v_label = video_options
                                         .iter()
@@ -1525,7 +1525,7 @@ impl eframe::App for MultiRecordingApp {
                                 ui.painter().text(
                                     rect.center(),
                                     egui::Align2::CENTER_CENTER,
-                                    "📷 Video preview 1\n(Ready / Standby)",
+                                    "📷 Gameplay\n(Ready / Standby)",
                                     FontId::new(13.0, FontFamily::Proportional),
                                     Color32::from_rgb(113, 113, 122),
                                 );
@@ -1549,7 +1549,7 @@ impl eframe::App for MultiRecordingApp {
                         .show(ui, |ui| {
                             // Header + Device Selector
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("Video preview 2").strong().color(Color32::from_rgb(244, 244, 245)));
+                                ui.label(RichText::new("Facecam").strong().color(Color32::from_rgb(244, 244, 245)));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let cur_cam_v_label = video_options
                                         .iter()
@@ -1599,7 +1599,7 @@ impl eframe::App for MultiRecordingApp {
                                 ui.painter().text(
                                     rect.center(),
                                     egui::Align2::CENTER_CENTER,
-                                    "📷 Video preview 2\n(Standby)",
+                                    "📷 Facecam\n(Standby)",
                                     FontId::new(13.0, FontFamily::Proportional),
                                     Color32::from_rgb(113, 113, 122),
                                 );
