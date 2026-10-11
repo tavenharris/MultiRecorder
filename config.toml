@@ -1,8 +1,8 @@
 buffer_duration_secs = 1800
 segment_duration_secs = 5
 output_dir = "recordings"
-buffer_dir = "/tmp/multirecording_buffer"
-output_format = "mp4"
+buffer_dir = 'C:\Users\taven\AppData\Local\Temp\multirecording_buffer'
+output_format = "mov"
 audio_bitrate = "256k"
 sync_audio_to_secondary = false
 embed_timecode = true
@@ -10,34 +10,34 @@ clip_intervals = [
     30,
     60,
     300,
-    1200,
+    1800,
 ]
 
 [[sources]]
 name = "gameplay"
-video_device = "0"
+video_device = "desktop"
 fps = 30
-video_bitrate = "30M"
-encoder = "h264_videotoolbox"
+video_bitrate = "20M"
+encoder = "h264_nvenc"
 
 [[sources]]
 name = "facecam"
-video_device = "1"
+video_device = "Game Capture HD60 Pro"
 fps = 60
 video_bitrate = "8M"
-encoder = "h264_videotoolbox"
+encoder = "h264_nvenc"
 
 [[audio_tracks]]
 enabled = true
-name = "BlackHole 2ch"
+name = "Speakers (Razer BlackShark V2 X USB) (Default Output)"
+device_index = 4
+device_id = "Speakers (Razer BlackShark V2 X USB)"
+
+[[audio_tracks]]
+enabled = true
+name = "Microphone (Razer BlackShark V2 X USB)"
 device_index = 0
-device_id = "in:0"
-
-[[audio_tracks]]
-enabled = true
-name = "MacBook Pro Microphone"
-device_index = 1
-device_id = "in:1"
+device_id = "Microphone (Razer BlackShark V2 X USB)"
 
 [[audio_tracks]]
 enabled = false

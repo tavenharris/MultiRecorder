@@ -201,7 +201,7 @@ impl RecordingEngine {
             None
         };
 
-        for mgr in &self.managers {
+        for (idx, mgr) in self.managers.iter().enumerate() {
             let segments = mgr.get_segments_for_duration(target_duration)?;
             if segments.is_empty() {
                 println!(
@@ -223,7 +223,20 @@ impl RecordingEngine {
                 out_ext
             ));
             Remuxer::stitch_segments(&segments, &stream_output, shared_timecode.as_deref())?;
-            exported_files.push(stream_output);
+            exported_files.push(stream_output.clone());
+
+            if idx == 0 {
+                if let Ok(wav_files) = Remuxer::export_separate_audio_tracks(
+                    &stream_output,
+                    &self.config.output_dir,
+                    "Flashback",
+                    &timestamp,
+                    &self.config.audio_tracks,
+                    shared_timecode.as_deref(),
+                ) {
+                    exported_files.extend(wav_files);
+                }
+            }
         }
 
         let elapsed = start_time.elapsed();

@@ -273,7 +273,7 @@ impl StreamRecorder {
         let enabled_tracks: Vec<&AudioTrackConfig> = self
             .audio_tracks
             .iter()
-            .filter(|t| t.enabled)
+            .filter(|t| t.enabled && t.device_id != "none")
             .collect();
 
         let mut cmd = Command::new("ffmpeg");
@@ -320,13 +320,17 @@ impl StreamRecorder {
         // Output 0: Segments
         cmd.args(["-map", "[rec]"]);
 
-        // Map each audio stream with its dedicated track title metadata
+        // Map each audio stream as a discrete track with title/handler metadata and enabled disposition for Premiere Pro / DaVinci Resolve
         for (i, track) in enabled_tracks.iter().enumerate() {
             let input_idx = crate::platform::CurrentPlatform.audio_input_index(i);
             cmd.args(["-map", &format!("{}:a", input_idx)]);
             cmd.args([
                 &format!("-metadata:s:a:{}", i),
                 &format!("title={}", track.name),
+                &format!("-metadata:s:a:{}", i),
+                &format!("handler_name={}", track.name),
+                &format!("-disposition:a:{}", i),
+                "default",
             ]);
         }
 
@@ -344,9 +348,18 @@ impl StreamRecorder {
             "yuv420p",
         ]);
 
-        // Audio encoder settings (applied to all mapped audio tracks)
+        // Audio encoder settings (applied to all mapped audio tracks; uniform 48kHz stereo for NLE multitrack import)
         if !enabled_tracks.is_empty() {
-            cmd.args(["-c:a", "aac", "-b:a", &self.audio_bitrate]);
+            cmd.args([
+                "-c:a",
+                "aac",
+                "-b:a",
+                &self.audio_bitrate,
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+            ]);
         }
 
         // Segment muxer settings for rolling buffer

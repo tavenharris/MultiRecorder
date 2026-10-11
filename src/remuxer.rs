@@ -57,6 +57,12 @@ impl Remuxer {
             "0",
             "-i",
             &list_file.to_string_lossy(),
+            "-map",
+            "0:v",
+            "-map",
+            "0:a?",
+            "-disposition:a",
+            "default",
             "-c",
             "copy",
         ]);
@@ -91,7 +97,65 @@ impl Remuxer {
             bail!("FFmpeg remuxing failed: {}", stderr);
         }
 
+        if !is_mkv {
+            let _ = Self::clear_mp4_mov_alternate_groups(output_file);
+        }
+
         tracing::info!("Successfully exported {:?}", output_file);
+        Ok(())
+    }
+
+    /// Clears `alternate_group` (sets to `0`) and ensures `flags = 0x0003` (`Track_enabled | Track_in_movie`)
+    /// on all audio/video `tkhd` (Track Header) atoms in the faststart `moov` header of `.mp4` / `.mov` files.
+    /// By default, FFmpeg assigns non-zero `alternate_group` values to audio tracks, which causes QuickTime
+    /// and Adobe Premiere Pro to treat tracks 2..N as mutually-exclusive language dubs instead of simultaneous
+    /// multitrack stems.
+    pub fn clear_mp4_mov_alternate_groups(file_path: &Path) -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(file_path)?;
+        let len = file.metadata()?.len() as usize;
+        let scan_len = len.min(262_144);
+        if scan_len < 64 {
+            return Ok(());
+        }
+
+        let mut buf = vec![0u8; scan_len];
+        file.read_exact(&mut buf)?;
+
+        let mut modified = false;
+        let mut i = 4usize;
+        while i + 56 <= scan_len {
+            if &buf[i..i + 4] == b"tkhd" {
+                let box_size = u32::from_be_bytes([buf[i - 4], buf[i - 3], buf[i - 2], buf[i - 1]]);
+                let version = buf[i + 4];
+                if (version == 0 && box_size == 92) || (version == 1 && box_size == 104) {
+                    let alt_offset = if version == 0 { i + 38 } else { i + 50 };
+                    let vol_offset = if version == 0 { i + 40 } else { i + 52 };
+                    // Audio tracks in MP4/MOV have volume > 0 (typically 0x0100 = 1.0)
+                    let volume = u16::from_be_bytes([buf[vol_offset], buf[vol_offset + 1]]);
+                    if volume > 0 {
+                        // Ensure Track_enabled | Track_in_movie | Track_in_preview (0x07)
+                        buf[i + 7] |= 0x07;
+                    }
+                    if buf[alt_offset] != 0 || buf[alt_offset + 1] != 0 {
+                        buf[alt_offset] = 0;
+                        buf[alt_offset + 1] = 0;
+                        modified = true;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        if modified {
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(&buf)?;
+            file.flush()?;
+        }
         Ok(())
     }
 
@@ -115,6 +179,141 @@ impl Remuxer {
     /// Generates standard session timestamp for output files
     pub fn generate_session_timestamp() -> String {
         Local::now().format("%Y%m%d_%H%M%S").to_string()
+    }
+
+    /// Converts an `HH:MM:SS:FF` SMPTE timecode into Broadcast Wave Format (BWF) `time_reference`
+    /// (number of audio samples since midnight at `sample_rate`, e.g. 48000 Hz) so Adobe Premiere Pro
+    /// and DaVinci Resolve can auto-synchronize standalone `.wav` files with `.mp4`/`.mov` video via Timecode.
+    pub fn timecode_to_bwf_sample_reference(timecode: &str, sample_rate: u64) -> Option<u64> {
+        let parts: Vec<&str> = timecode.split(':').collect();
+        if parts.len() >= 3 {
+            let hh: u64 = parts[0].parse().ok()?;
+            let mm: u64 = parts[1].parse().ok()?;
+            let ss: u64 = parts[2].parse().ok()?;
+            let total_secs = hh * 3600 + mm * 60 + ss;
+            Some(total_secs * sample_rate)
+        } else {
+            None
+        }
+    }
+
+    /// Produces a clean, concise filesystem-safe label for an audio track filename.
+    pub fn sanitize_track_label(name: &str) -> String {
+        let cleaned = name
+            .replace("(Default Output)", "")
+            .replace("(WASAPI Loopback)", "");
+        let mut out = String::new();
+        let mut prev_underscore = false;
+        for c in cleaned.trim().chars() {
+            if c.is_ascii_alphanumeric() {
+                out.push(c);
+                prev_underscore = false;
+            } else if !prev_underscore && !out.is_empty() {
+                out.push('_');
+                prev_underscore = true;
+            }
+        }
+        let trimmed = out.trim_matches('_');
+        if trimmed.is_empty() {
+            "Audio".to_string()
+        } else if trimmed.len() > 32 {
+            trimmed[..32].trim_matches('_').to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    /// Extracts each enabled audio track from the stitched primary video container into its own
+    /// standalone Broadcast WAV (`.wav`) file with embedded BWF SMPTE Timecode (`time_reference`)
+    /// and zero-aligned start timestamps (`first_pts=0`) for instant sync in Premiere Pro.
+    pub fn export_separate_audio_tracks(
+        primary_video_file: &Path,
+        output_dir: &Path,
+        prefix: &str,
+        timestamp: &str,
+        audio_tracks: &[crate::config::AudioTrackConfig],
+        timecode: Option<&str>,
+    ) -> Result<Vec<PathBuf>> {
+        let enabled: Vec<(usize, &crate::config::AudioTrackConfig)> = audio_tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.enabled && t.device_id != "none")
+            .collect();
+
+        if enabled.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        fs::create_dir_all(output_dir)?;
+
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args([
+            "-y",
+            "-i",
+            &primary_video_file.to_string_lossy(),
+        ]);
+
+        let bwf_ref = timecode.and_then(|tc| Self::timecode_to_bwf_sample_reference(tc, 48000));
+        let mut exported_wavs = Vec::new();
+
+        for (stream_idx, (track_slot_idx, track)) in enabled.iter().enumerate() {
+            let label = Self::sanitize_track_label(&track.name);
+            let wav_path = output_dir.join(format!(
+                "{}_{}_track{}_{}.wav",
+                prefix,
+                timestamp,
+                track_slot_idx + 1,
+                label
+            ));
+
+            cmd.args([
+                "-map",
+                &format!("0:a:{}", stream_idx),
+                "-af",
+                "aresample=async=1:first_pts=0",
+                "-c:a",
+                "pcm_s16le",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-rf64",
+                "auto",
+                "-write_bext",
+                "1",
+                "-metadata",
+                &format!("title={}", track.name),
+            ]);
+
+            if let Some(tc) = timecode {
+                cmd.args(["-metadata", &format!("timecode={}", tc)]);
+            }
+            if let Some(samples) = bwf_ref {
+                cmd.args(["-metadata", &format!("time_reference={}", samples)]);
+            }
+
+            cmd.arg(&wav_path);
+            exported_wavs.push(wav_path);
+        }
+
+        tracing::info!(
+            "Exporting {} standalone synchronized BWF WAV audio track(s) from {:?}...",
+            exported_wavs.len(),
+            primary_video_file
+        );
+
+        let status = cmd
+            .output()
+            .context("Failed to run ffmpeg standalone audio track exporter")?;
+
+        if !status.status.success() {
+            let stderr = String::from_utf8_lossy(&status.stderr);
+            tracing::warn!("Standalone audio track export warning: {}", stderr);
+            // Return any wav files that were successfully created
+            exported_wavs.retain(|p| p.exists());
+        }
+
+        Ok(exported_wavs)
     }
 }
 

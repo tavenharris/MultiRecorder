@@ -422,5 +422,126 @@ fn test_windows_wasapi_loopback_tcp_bridge() {
     }
 }
 
+#[test]
+fn test_multitrack_audio_preserved_in_remuxed_mp4() {
+    use std::process::Command;
+
+    let temp_dir = std::env::temp_dir().join(format!("test_multitrack_{}", std::process::id()));
+    let _ = fs::create_dir_all(&temp_dir);
+
+    let seg1 = temp_dir.join("gameplay_20261010_190000.mp4");
+    let seg2 = temp_dir.join("gameplay_20261010_190002.mp4");
+    let out_mp4 = temp_dir.join("exported_multitrack.mp4");
+
+    // Generate 2 segments each containing 1 video track + 3 discrete audio tracks (Track 1, Track 2, Track 3)
+    for seg in [&seg1, &seg2] {
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f", "lavfi", "-i", "testsrc=duration=1:size=320x180:rate=30",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                "-f", "lavfi", "-i", "sine=frequency=880:duration=1",
+                "-f", "lavfi", "-i", "sine=frequency=1320:duration=1",
+                "-map", "0:v",
+                "-map", "1:a",
+                "-map", "2:a",
+                "-map", "3:a",
+                "-metadata:s:a:0", "title=Speakers",
+                "-metadata:s:a:1", "title=Microphone",
+                "-metadata:s:a:2", "title=Discord",
+                "-disposition:a:0", "default",
+                "-disposition:a:1", "default",
+                "-disposition:a:2", "default",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                &seg.to_string_lossy(),
+            ])
+            .output();
+
+        if status.is_err() || !status.unwrap().status.success() {
+            // Skip if ffmpeg is not installed on CI host
+            let _ = fs::remove_dir_all(&temp_dir);
+            return;
+        }
+    }
+
+    Remuxer::stitch_segments(&[seg1, seg2], &out_mp4, Some("19:00:00:00")).unwrap();
+    assert!(out_mp4.exists());
+
+    // Inspect exported MP4 streams with ffmpeg -i and verify all 3 audio streams are present and marked (default)
+    let probe = Command::new("ffmpeg")
+        .args(["-hide_banner", "-i", &out_mp4.to_string_lossy()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&probe.stderr);
+    let audio_streams: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.contains("Stream #0:") && l.contains("Audio: aac"))
+        .collect();
+
+    assert_eq!(
+        audio_streams.len(),
+        3,
+        "Expected all 3 discrete audio tracks in exported MP4, got:\n{}",
+        stderr
+    );
+    for line in &audio_streams {
+        assert!(
+            line.contains("(default)"),
+            "Expected audio stream to have (default) disposition for Premiere Pro import, got: {}",
+            line
+        );
+    }
+
+    // Also verify standalone synchronized Broadcast WAV (.wav) track export with BWF SMPTE timecode
+    let track_configs = vec![
+        AudioTrackConfig {
+            enabled: true,
+            name: "Speakers (Razer BlackShark V2 X USB) (Default Output)".to_string(),
+            device_index: 0,
+            device_id: "Speakers (Razer BlackShark V2 X USB)".to_string(),
+        },
+        AudioTrackConfig {
+            enabled: true,
+            name: "Microphone (Razer BlackShark V2 X USB)".to_string(),
+            device_index: 0,
+            device_id: "Microphone (Razer BlackShark V2 X USB)".to_string(),
+        },
+        AudioTrackConfig {
+            enabled: true,
+            name: "Discord".to_string(),
+            device_index: 0,
+            device_id: "Discord".to_string(),
+        },
+    ];
+
+    let wavs = Remuxer::export_separate_audio_tracks(
+        &out_mp4,
+        &temp_dir,
+        "Recording",
+        "20261010_190000",
+        &track_configs,
+        Some("19:00:00:00"),
+    )
+    .unwrap();
+    assert_eq!(wavs.len(), 3, "Expected 3 standalone synchronized WAV files");
+    for wav in &wavs {
+        assert!(wav.exists());
+        let wav_probe = Command::new("ffmpeg")
+            .args(["-hide_banner", "-i", &wav.to_string_lossy()])
+            .output()
+            .unwrap();
+        let wav_stderr = String::from_utf8_lossy(&wav_probe.stderr);
+        assert!(
+            wav_stderr.contains("time_reference"),
+            "Expected Broadcast WAV time_reference metadata for Premiere Pro timecode sync, got:\n{}",
+            wav_stderr
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+
 
 

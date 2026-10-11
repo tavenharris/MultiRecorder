@@ -702,12 +702,14 @@ impl MultiRecordingApp {
             let tracks = if i == 0 {
                 self.config.audio_tracks.clone()
             } else if i == 1 && self.config.sync_audio_to_secondary {
-                if let Some(t1) = self.config.audio_tracks.first().cloned() {
-                    if t1.enabled {
-                        vec![t1]
-                    } else {
-                        vec![]
-                    }
+                if let Some(t1) = self
+                    .config
+                    .audio_tracks
+                    .iter()
+                    .find(|t| t.enabled && t.device_id != "none")
+                    .cloned()
+                {
+                    vec![t1]
                 } else {
                     vec![]
                 }
@@ -822,7 +824,7 @@ impl MultiRecordingApp {
         };
 
         // 2. Stitch all segments for each manager
-        for mgr in &self.managers {
+        for (idx, mgr) in self.managers.iter().enumerate() {
             let segments: Vec<PathBuf> = match mgr.list_segments() {
                 Ok(segs) => segs.into_iter().map(|s| s.path).collect(),
                 Err(e) => {
@@ -850,7 +852,26 @@ impl MultiRecordingApp {
             if let Ok(meta) = fs::metadata(&out_file) {
                 total_size += meta.len() as f64 / (1024.0 * 1024.0);
             }
-            exported_files.push(out_file);
+            exported_files.push(out_file.clone());
+
+            // Export standalone synchronized Broadcast WAV (.wav) files for each enabled audio track from Stream 1
+            if idx == 0 {
+                if let Ok(wav_files) = Remuxer::export_separate_audio_tracks(
+                    &out_file,
+                    &self.config.output_dir,
+                    "Recording",
+                    &timestamp,
+                    &self.config.audio_tracks,
+                    shared_timecode.as_deref(),
+                ) {
+                    for wav in wav_files {
+                        if let Ok(meta) = fs::metadata(&wav) {
+                            total_size += meta.len() as f64 / (1024.0 * 1024.0);
+                        }
+                        exported_files.push(wav);
+                    }
+                }
+            }
         }
 
         // 3. Clear temporary buffer directory now that continuous file has been created
@@ -923,7 +944,7 @@ impl MultiRecordingApp {
             None
         };
 
-        for mgr in &self.managers {
+        for (idx, mgr) in self.managers.iter().enumerate() {
             let segments = match mgr.get_segments_for_duration(target_duration) {
                 Ok(s) => s,
                 Err(e) => {
@@ -961,7 +982,26 @@ impl MultiRecordingApp {
             if let Ok(meta) = fs::metadata(&out_file) {
                 total_size += meta.len() as f64 / (1024.0 * 1024.0);
             }
-            exported_files.push(out_file);
+            exported_files.push(out_file.clone());
+
+            // Export standalone synchronized Broadcast WAV (.wav) files for each enabled audio track from Stream 1
+            if idx == 0 {
+                if let Ok(wav_files) = Remuxer::export_separate_audio_tracks(
+                    &out_file,
+                    &self.config.output_dir,
+                    "Flashback",
+                    &timestamp,
+                    &self.config.audio_tracks,
+                    shared_timecode.as_deref(),
+                ) {
+                    for wav in wav_files {
+                        if let Ok(meta) = fs::metadata(&wav) {
+                            total_size += meta.len() as f64 / (1024.0 * 1024.0);
+                        }
+                        exported_files.push(wav);
+                    }
+                }
+            }
         }
 
         let elapsed = start.elapsed();
