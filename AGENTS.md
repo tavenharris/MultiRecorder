@@ -121,6 +121,12 @@ When modifying or refactoring this project, future agents **must respect these h
 - **The Quirk:** On Windows, `AudioTrackMonitor` uses `cpal` to tap CoreAudio WASAPI loopback directly in-process. In WASAPI loopback, `cpal::StreamError::ErrorKind::Xrun` (buffer underrun/overrun) naturally triggers during stream pause, volume changes, or silence intervals.
 - **The Invariant:** `start_cpal_monitor` error callbacks must suppress `Xrun` errors to prevent flooding stderr/stdout, while continuing to log all actionable system audio errors.
 
+### L. Cross-Platform Configuration Re-mapping & Defensive Audio Input Resolution
+- **The Quirk:** When sharing or moving `config.toml` across macOS and Windows (or when a headset is unplugged), macOS saves audio tracks with AVFoundation index strings (e.g. `device_id = "in:0"`), whereas Windows DirectShow strictly expects friendly device names (e.g. `audio="Microphone (Razer BlackShark V2 X USB)"`). Passing integer strings like `audio=0` causes DirectShow to fail with an I/O error (`exit code: 0xfffffffb`), crashing FFmpeg.
+- **The Invariants:**
+  1. `sync_device_selections()` in `src/ui.rs` cross-examines all configured audio tracks against `discovered_devices`. If a saved track cannot be resolved (cross-platform migration or unplugged device), it automatically re-maps Track 1 to the host's primary `AudioInput` hardware device.
+  2. `build_recording_input_args()` in `src/platform/windows.rs` defensively checks for numeric or empty track IDs, resolving numeric indices to real DirectShow device names, and falling back to `-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000` to prevent any possibility of subprocess crashes.
+
 ---
 
 ## 4. Hardware Encoding Configuration

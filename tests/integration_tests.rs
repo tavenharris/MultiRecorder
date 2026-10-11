@@ -360,6 +360,17 @@ fn test_audio_track_monitor_lifecycle() {
     let peak = monitor.get_peak();
     assert!(peak >= 0.0 && peak <= 1.0);
     monitor.stop();
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut mic_mon = AudioTrackMonitor::new("Microphone (Razer BlackShark V2 X USB)");
+        let _ = mic_mon.get_peak();
+        mic_mon.stop();
+
+        let mut out_mon = AudioTrackMonitor::new("ED270R M (NVIDIA High Definition Audio)");
+        let _ = out_mon.get_peak();
+        out_mon.stop();
+    }
 }
 
 #[test]
@@ -372,6 +383,21 @@ fn test_recording_modes() {
     assert_ne!(mode_fb, mode_cont);
     assert_eq!(mode_fb, RecordingMode::Flashback);
     assert_eq!(mode_cont, RecordingMode::Continuous);
+}
+
+#[test]
+fn test_cross_platform_config_audio_track_migration() {
+    use multirecording::config::Config;
+
+    let mut cfg = Config::default();
+    cfg.audio_tracks[0].enabled = true;
+    cfg.audio_tracks[0].name = "Taven’s AirPods Pro".to_string();
+    cfg.audio_tracks[0].device_id = "in:0".to_string();
+
+    // Verify Windows argument generation never chokes on in:0 with "audio=0"
+    let win = multirecording::platform::windows::WindowsPlatform;
+    let win_args = win.build_recording_input_args("desktop", 30, &cfg.audio_tracks);
+    assert!(!win_args.contains(&"audio=0".to_string()));
 }
 
 

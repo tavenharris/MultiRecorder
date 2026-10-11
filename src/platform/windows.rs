@@ -120,6 +120,20 @@ pub fn ensure_ffmpeg_in_path() {
     }
 }
 
+pub fn query_dshow_audio_devices() -> Vec<String> {
+    ensure_ffmpeg_in_path();
+    if let Ok(output) = Command::new("ffmpeg")
+        .args(["-f", "dshow", "-list_devices", "true", "-i", "dummy"])
+        .output()
+    {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let (_, audios) = parse_dshow_devices(&stderr);
+        audios
+    } else {
+        Vec::new()
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WindowsPlatform;
 
@@ -392,18 +406,53 @@ impl WindowsPlatform {
                 let clean_name = id
                     .strip_prefix("audio=")
                     .or_else(|| id.strip_prefix("in:"))
-                    .unwrap_or(id);
-                let audio_arg = if clean_name.starts_with("audio=") {
-                    clean_name.to_string()
+                    .unwrap_or(id)
+                    .trim();
+
+                if clean_name.is_empty() || clean_name == "none" {
+                    args.extend([
+                        "-f".to_string(),
+                        "lavfi".to_string(),
+                        "-i".to_string(),
+                        "anullsrc=channel_layout=stereo:sample_rate=48000".to_string(),
+                    ]);
+                } else if let Ok(num) = clean_name.parse::<usize>() {
+                    let dshow_audios = query_dshow_audio_devices();
+                    if let Some(real_name) = dshow_audios.get(num) {
+                        args.extend([
+                            "-f".to_string(),
+                            "dshow".to_string(),
+                            "-i".to_string(),
+                            format!("audio={}", real_name),
+                        ]);
+                    } else if let Some(first) = dshow_audios.first() {
+                        args.extend([
+                            "-f".to_string(),
+                            "dshow".to_string(),
+                            "-i".to_string(),
+                            format!("audio={}", first),
+                        ]);
+                    } else {
+                        args.extend([
+                            "-f".to_string(),
+                            "lavfi".to_string(),
+                            "-i".to_string(),
+                            "anullsrc=channel_layout=stereo:sample_rate=48000".to_string(),
+                        ]);
+                    }
                 } else {
-                    format!("audio={}", clean_name)
-                };
-                args.extend([
-                    "-f".to_string(),
-                    "dshow".to_string(),
-                    "-i".to_string(),
-                    audio_arg,
-                ]);
+                    let audio_arg = if clean_name.starts_with("audio=") {
+                        clean_name.to_string()
+                    } else {
+                        format!("audio={}", clean_name)
+                    };
+                    args.extend([
+                        "-f".to_string(),
+                        "dshow".to_string(),
+                        "-i".to_string(),
+                        audio_arg,
+                    ]);
+                }
             }
         }
 
@@ -554,25 +603,31 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
         .unwrap_or(identifier)
         .trim();
 
-    let is_output_request = clean_id.eq_ignore_ascii_case("wasapi")
+    let clean_id_normalized = clean_id
+        .replace(" (Default Output)", "")
+        .replace(" (WASAPI Loopback)", "");
+
+    let is_explicit_output = clean_id.eq_ignore_ascii_case("wasapi")
         || clean_id.eq_ignore_ascii_case("default")
         || clean_id.to_lowercase().contains("desktop")
-        || clean_id.to_lowercase().contains("speaker")
         || identifier.starts_with("out:");
 
     let mut target_device = None;
     let mut is_loopback = false;
 
-    if is_output_request {
-        // Try to match output device by name
+    let matches_name = |desc_name: &str, search: &str| -> bool {
+        let dn = desc_name.to_lowercase();
+        let s = search.to_lowercase();
+        dn == s || dn.contains(&s) || s.contains(&dn)
+    };
+
+    if is_explicit_output {
+        // Explicit loopback output request
         if let Ok(outputs) = host.output_devices() {
             for dev in outputs {
                 if let Ok(desc) = dev.description() {
                     let d_name = desc.name();
-                    if clean_id.eq_ignore_ascii_case(&d_name)
-                        || d_name.to_lowercase().contains(&clean_id.to_lowercase())
-                        || clean_id.to_lowercase().contains(&d_name.to_lowercase())
-                    {
+                    if matches_name(&d_name, &clean_id_normalized) {
                         target_device = Some(dev);
                         is_loopback = true;
                         break;
@@ -585,41 +640,37 @@ pub fn start_cpal_monitor(identifier: &str, peak: Arc<AtomicU32>) -> Option<cpal
             is_loopback = true;
         }
     } else {
-        // Try to match input device (microphone)
-        if let Ok(inputs) = host.input_devices() {
-            for dev in inputs {
+        // Check output devices first (e.g. Speakers, Monitors like ED270R M)
+        if let Ok(outputs) = host.output_devices() {
+            for dev in outputs {
                 if let Ok(desc) = dev.description() {
                     let d_name = desc.name();
-                    if clean_id.eq_ignore_ascii_case(&d_name)
-                        || d_name.to_lowercase().contains(&clean_id.to_lowercase())
-                        || clean_id.to_lowercase().contains(&d_name.to_lowercase())
-                    {
+                    if matches_name(&d_name, &clean_id_normalized) {
                         target_device = Some(dev);
-                        is_loopback = false;
+                        is_loopback = true;
                         break;
                     }
                 }
             }
         }
-        // If not found in inputs, try outputs (user might have selected a playback device)
+
+        // If not matched in outputs, check input devices (Microphones, capture cards)
         if target_device.is_none() {
-            if let Ok(outputs) = host.output_devices() {
-                for dev in outputs {
+            if let Ok(inputs) = host.input_devices() {
+                for dev in inputs {
                     if let Ok(desc) = dev.description() {
                         let d_name = desc.name();
-                        if clean_id.eq_ignore_ascii_case(&d_name)
-                            || d_name.to_lowercase().contains(&clean_id.to_lowercase())
-                            || clean_id.to_lowercase().contains(&d_name.to_lowercase())
-                        {
+                        if matches_name(&d_name, &clean_id_normalized) {
                             target_device = Some(dev);
-                            is_loopback = true;
+                            is_loopback = false;
                             break;
                         }
                     }
                 }
             }
         }
-        // Fallback to default output
+
+        // Fallback to default output device if still not found
         if target_device.is_none() {
             target_device = host.default_output_device();
             is_loopback = true;
@@ -935,5 +986,30 @@ mod tests {
                 "pipe:1"
             ]
         );
+    }
+
+    #[test]
+    fn test_windows_recording_args_numeric_and_empty_fallback() {
+        let win = WindowsPlatform;
+        let tracks = vec![
+            AudioTrackConfig {
+                enabled: true,
+                name: "Taven’s AirPods Pro".to_string(),
+                device_index: 0,
+                device_id: "in:0".to_string(),
+            },
+            AudioTrackConfig {
+                enabled: true,
+                name: "None Track".to_string(),
+                device_index: 1,
+                device_id: "none".to_string(),
+            },
+        ];
+
+        let args = win.build_recording_input_args("desktop", 30, &tracks);
+        // Track 0 was "in:0" (Mac style numeric index) -> must NEVER produce "audio=0"
+        assert!(!args.contains(&"audio=0".to_string()));
+        // Track 1 was "none" -> should fall back to lavfi anullsrc silent generator
+        assert!(args.contains(&"anullsrc=channel_layout=stereo:sample_rate=48000".to_string()));
     }
 }

@@ -362,12 +362,73 @@ impl MultiRecordingApp {
             });
         }
 
-        for track in &mut self.config.audio_tracks {
+        // Available hardware audio inputs on current host platform
+        let available_inputs: Vec<&Device> = self.discovered_devices
+            .iter()
+            .filter(|d| d.device_type == DeviceType::AudioInput)
+            .collect();
+
+        for (i, track) in self.config.audio_tracks.iter_mut().enumerate() {
             if track.device_id.is_empty() {
                 if track.enabled {
                     track.device_id = format!("in:{}", track.device_index);
                 } else {
                     track.device_id = "none".to_string();
+                }
+            }
+
+            if track.enabled && track.device_id != "none" {
+                let matched_dev = self.discovered_devices.iter().find(|d| d.id == track.device_id)
+                    .or_else(|| {
+                        let clean = track.device_id
+                            .strip_prefix("out:")
+                            .or_else(|| track.device_id.strip_prefix("in:"))
+                            .or_else(|| track.device_id.strip_prefix("audio="))
+                            .unwrap_or(&track.device_id)
+                            .trim();
+                        if !clean.is_empty() && clean.parse::<usize>().is_err() {
+                            self.discovered_devices.iter().find(|d| d.id == clean || d.name.eq_ignore_ascii_case(clean))
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        self.discovered_devices.iter().find(|d| d.name.eq_ignore_ascii_case(&track.name))
+                    })
+                    .or_else(|| {
+                        if track.device_id == "wasapi" || track.device_id == "default" || track.name.to_lowercase().contains("desktop") {
+                            self.discovered_devices.iter().find(|d| d.device_type == DeviceType::AudioOutput)
+                        } else {
+                            None
+                        }
+                    });
+
+                if let Some(dev) = matched_dev {
+                    track.device_id = dev.id.clone();
+                    track.name = dev.name.clone();
+                    track.device_index = dev.av_index.unwrap_or(dev.index);
+                } else {
+                    // Cross-platform migration or disconnected hardware fallback:
+                    // Automatically re-map to current platform's available audio inputs
+                    if i == 0 {
+                        if let Some(first_input) = available_inputs.first() {
+                            track.device_id = first_input.id.clone();
+                            track.name = first_input.name.clone();
+                            track.device_index = first_input.av_index.unwrap_or(first_input.index);
+                        } else {
+                            track.enabled = false;
+                            track.device_id = "none".to_string();
+                            track.name = "Track 1".to_string();
+                        }
+                    } else if let Some(alt_input) = available_inputs.get(i) {
+                        track.device_id = alt_input.id.clone();
+                        track.name = alt_input.name.clone();
+                        track.device_index = alt_input.av_index.unwrap_or(alt_input.index);
+                    } else {
+                        track.enabled = false;
+                        track.device_id = "none".to_string();
+                        track.name = format!("Track {}", i + 1);
+                    }
                 }
             }
         }
