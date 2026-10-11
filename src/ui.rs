@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use crate::config::{AudioTrackConfig, Config, SourceConfig};
+use crate::config::{Config, SourceConfig};
 use crate::devices::{Device, DeviceManager, DeviceType};
 use crate::recorder::{AudioTrackMonitor, PreviewStream, StreamRecorder};
 use crate::remuxer::Remuxer;
@@ -163,6 +163,17 @@ impl MultiRecordingApp {
     }
 
     pub fn sync_audio_monitors(&mut self) {
+        #[cfg(target_os = "macos")]
+        if self.is_recording {
+            for i in 0..5 {
+                if let Some(mut old) = self.audio_monitors[i].take() {
+                    old.stop();
+                }
+                self.audio_levels[i] = 0.0;
+            }
+            return;
+        }
+
         for i in 0..5 {
             let track = self.config.audio_tracks.get(i);
             if let Some(track) = track {
@@ -220,7 +231,7 @@ impl MultiRecordingApp {
         // Preview stream 1
         let dev1 = self.video_devices().into_iter().find(|d| d.index == self.game_video_idx).map(|d| d.id.clone()).unwrap_or_else(|| self.game_video_idx.to_string());
         if self.preview_stream_1.is_none() {
-            let is_screen = self.video_devices().iter().find(|d| d.index == self.game_video_idx).map(|d| d.name.to_lowercase().contains("screen")).unwrap_or(false);
+            let is_screen = self.video_devices().iter().find(|d| d.index == self.game_video_idx).map(|d| d.name.to_lowercase().contains("screen") || d.id.eq_ignore_ascii_case("desktop")).unwrap_or(false);
             let mut ps1 = PreviewStream::new(dev1, is_screen);
             let _ = ps1.start();
             self.preview_stream_1 = Some(ps1);
@@ -229,11 +240,13 @@ impl MultiRecordingApp {
         // Preview stream 2 (only if distinct video device)
         let dev2 = self.video_devices().into_iter().find(|d| d.index == self.cam_video_idx).map(|d| d.id.clone()).unwrap_or_else(|| self.cam_video_idx.to_string());
         if self.cam_video_idx != self.game_video_idx && self.preview_stream_2.is_none() {
-            let is_screen = self.video_devices().iter().find(|d| d.index == self.cam_video_idx).map(|d| d.name.to_lowercase().contains("screen")).unwrap_or(false);
+            let is_screen = self.video_devices().iter().find(|d| d.index == self.cam_video_idx).map(|d| d.name.to_lowercase().contains("screen") || d.id.eq_ignore_ascii_case("desktop")).unwrap_or(false);
             let mut ps2 = PreviewStream::new(dev2, is_screen);
             let _ = ps2.start();
             self.preview_stream_2 = Some(ps2);
         }
+
+        self.sync_audio_monitors();
     }
 
     pub fn stop_preview_streams(&mut self) {
@@ -242,6 +255,13 @@ impl MultiRecordingApp {
         }
         if let Some(mut ps2) = self.preview_stream_2.take() {
             ps2.stop();
+        }
+        #[cfg(target_os = "macos")]
+        for i in 0..5 {
+            if let Some(mut old) = self.audio_monitors[i].take() {
+                old.stop();
+            }
+            self.audio_levels[i] = 0.0;
         }
         self.preview_texture_1 = None;
         self.preview_texture_2 = None;
@@ -293,6 +313,25 @@ impl MultiRecordingApp {
     }
 
     fn sync_device_selections(&mut self) {
+        let fixes = self.config.sanitize_for_platform(&self.discovered_devices);
+        if !fixes.is_empty() {
+            for fix in &fixes {
+                tracing::info!("Startup hardware/OS compatibility auto-heal: {}", fix);
+            }
+            let _ = self.config.save_to_file(&self.config_path);
+            if self.status_message.is_none() {
+                self.status_message = Some((
+                    format!(
+                        "✔ Auto-configured {} setting{} for this machine's hardware & OS.",
+                        fixes.len(),
+                        if fixes.len() == 1 { "" } else { "s" }
+                    ),
+                    Instant::now(),
+                    false,
+                ));
+            }
+        }
+
         let v_devs: Vec<(usize, String, String)> = self.video_devices()
             .into_iter()
             .map(|d| (d.index, d.id.clone(), d.name.clone()))
@@ -321,116 +360,6 @@ impl MultiRecordingApp {
         if self.config.sources.len() > 1 {
             let src2 = &self.config.sources[1];
             self.cam_video_idx = find_v_idx(&src2.video_device, 1);
-        }
-
-        // Validate encoders against current platform support
-        let valid_encoders: Vec<&str> = crate::platform::CurrentPlatform
-            .available_encoders()
-            .iter()
-            .map(|(enc, _)| *enc)
-            .collect();
-        let default_enc = crate::platform::CurrentPlatform.default_video_encoder();
-
-        for src in &mut self.config.sources {
-            if !valid_encoders.contains(&src.encoder.as_str()) {
-                src.encoder = default_enc.to_string();
-            }
-        }
-
-        // Ensure at least 2 sources exist
-        while self.config.sources.len() < 2 {
-            let idx = self.config.sources.len();
-            let name = if idx == 0 { "gameplay" } else { "facecam" };
-            self.config.sources.push(SourceConfig {
-                name: name.to_string(),
-                video_device: "0".to_string(),
-                resolution: Some("1920x1080".to_string()),
-                fps: Some(60),
-                video_bitrate: if idx == 0 { "40M".to_string() } else { "15M".to_string() },
-                encoder: default_enc.to_string(),
-            });
-        }
-
-        // Ensure exactly 5 audio tracks are configured
-        while self.config.audio_tracks.len() < 5 {
-            let idx = self.config.audio_tracks.len() + 1;
-            self.config.audio_tracks.push(AudioTrackConfig {
-                enabled: false,
-                name: format!("Track {}", idx),
-                device_index: 0,
-                device_id: "none".to_string(),
-            });
-        }
-
-        // Available hardware audio inputs on current host platform
-        let available_inputs: Vec<&Device> = self.discovered_devices
-            .iter()
-            .filter(|d| d.device_type == DeviceType::AudioInput)
-            .collect();
-
-        for (i, track) in self.config.audio_tracks.iter_mut().enumerate() {
-            if track.device_id.is_empty() {
-                if track.enabled {
-                    track.device_id = format!("in:{}", track.device_index);
-                } else {
-                    track.device_id = "none".to_string();
-                }
-            }
-
-            if track.enabled && track.device_id != "none" {
-                let matched_dev = self.discovered_devices.iter().find(|d| d.id == track.device_id)
-                    .or_else(|| {
-                        let clean = track.device_id
-                            .strip_prefix("out:")
-                            .or_else(|| track.device_id.strip_prefix("in:"))
-                            .or_else(|| track.device_id.strip_prefix("audio="))
-                            .unwrap_or(&track.device_id)
-                            .trim();
-                        if !clean.is_empty() && clean.parse::<usize>().is_err() {
-                            self.discovered_devices.iter().find(|d| d.id == clean || d.name.eq_ignore_ascii_case(clean))
-                        } else {
-                            None
-                        }
-                    })
-                    .or_else(|| {
-                        self.discovered_devices.iter().find(|d| d.name.eq_ignore_ascii_case(&track.name))
-                    })
-                    .or_else(|| {
-                        if track.device_id == "wasapi" || track.device_id == "default" || track.name.to_lowercase().contains("desktop") {
-                            self.discovered_devices.iter().find(|d| d.device_type == DeviceType::AudioOutput)
-                        } else {
-                            None
-                        }
-                    });
-
-                if let Some(dev) = matched_dev {
-                    track.device_id = dev.id.clone();
-                    track.name = dev.name.clone();
-                    track.device_index = dev.av_index.unwrap_or(dev.index);
-                } else {
-                    // Cross-platform migration or disconnected hardware fallback:
-                    // Automatically re-map to current platform's available audio inputs
-                    if i == 0 {
-                        if let Some(first_input) = available_inputs.first() {
-                            track.device_id = first_input.id.clone();
-                            track.name = first_input.name.clone();
-                            track.device_index = first_input.av_index.unwrap_or(first_input.index);
-                        } else {
-                            track.enabled = false;
-                            track.device_id = "none".to_string();
-                            track.name = "Track 1".to_string();
-                        }
-                    } else if let Some(alt_input) = available_inputs.get(i) {
-                        track.device_id = alt_input.id.clone();
-                        track.name = alt_input.name.clone();
-                        track.device_index = alt_input.av_index.unwrap_or(alt_input.index);
-                    } else {
-                        track.enabled = false;
-                        track.device_id = "none".to_string();
-                        track.name = format!("Track {}", i + 1);
-                    }
-                }
-            }
         }
     }
 
@@ -538,10 +467,10 @@ impl MultiRecordingApp {
     pub fn render_stream_format_controls(&mut self, ui: &mut egui::Ui, stream_idx: usize) {
         let (in_res, in_fps) = self.parse_input_res_fps(stream_idx);
 
-        // Auto-clamp output fps to input fps if higher than what hardware supplies
+        // Auto-clamp output fps to input fps if higher than what hardware supplies (and heal invalid <24fps)
         if let Some(src) = self.config.sources.get_mut(stream_idx) {
             if let Some(cur_fps) = src.fps {
-                if cur_fps > in_fps {
+                if cur_fps > in_fps || cur_fps < 24 {
                     src.fps = Some(in_fps);
                     let _ = self.config.save_to_file(&self.config_path);
                 }
@@ -707,6 +636,9 @@ impl MultiRecordingApp {
             return;
         }
 
+        let (_, in_fps_1) = self.parse_input_res_fps(0);
+        let (_, in_fps_2) = self.parse_input_res_fps(1);
+
         self.stop_preview_streams();
 
         let _ = fs::create_dir_all(&self.config.buffer_dir);
@@ -715,15 +647,20 @@ impl MultiRecordingApp {
         // Wipe any previous un-saved cached segments in buffer_dir when starting a fresh session
         let _ = RingBufferManager::wipe_buffer_dir(&self.config.buffer_dir);
 
-        // Sync dropdown selections into config
+        // Sync dropdown selections and hardware-clamped framerates into config
         let dev_id1 = self.video_devices().into_iter().find(|d| d.index == self.game_video_idx).map(|d| d.id.clone()).unwrap_or_else(|| self.game_video_idx.to_string());
         let dev_id2 = self.video_devices().into_iter().find(|d| d.index == self.cam_video_idx).map(|d| d.id.clone()).unwrap_or_else(|| self.cam_video_idx.to_string());
 
         if let Some(src1) = self.config.sources.first_mut() {
             src1.video_device = dev_id1;
+            let cur = src1.fps.unwrap_or(in_fps_1);
+            src1.fps = Some(if cur < 24 { in_fps_1 } else { cur.min(in_fps_1) });
         }
         if self.config.sources.len() > 1 {
-            self.config.sources[1].video_device = dev_id2;
+            let src2 = &mut self.config.sources[1];
+            src2.video_device = dev_id2;
+            let cur = src2.fps.unwrap_or(in_fps_2);
+            src2.fps = Some(if cur < 24 { in_fps_2 } else { cur.min(in_fps_2) });
         }
 
         // Map audio device indices
@@ -1165,8 +1102,8 @@ impl eframe::App for MultiRecordingApp {
                 }
             }
             if let Some(err) = failed_msg {
-                self.status_message = Some((err, Instant::now(), true));
                 self.stop_engine();
+                self.status_message = Some((err, Instant::now(), true));
             }
         }
 

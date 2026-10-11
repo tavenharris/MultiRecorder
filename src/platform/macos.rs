@@ -87,13 +87,16 @@ impl MacOSPlatform {
         enabled_tracks: &[AudioTrackConfig],
     ) -> Vec<String> {
         let clean = clean_avfoundation_video_device(video_device);
+        // AVFoundation devices strictly require 30 or 60 fps on input negotiation;
+        // non-standard values (e.g. 15 fps migrated from Windows config.toml) cause exit code 251 (EIO).
+        let av_fps = if in_fps == 60 { 60 } else { 30 };
         let mut args = Vec::new();
         if let Some(first_track) = enabled_tracks.first() {
             args.extend([
                 "-f".to_string(),
                 "avfoundation".to_string(),
                 "-framerate".to_string(),
-                in_fps.to_string(),
+                av_fps.to_string(),
                 "-i".to_string(),
                 format!("{}:{}", clean, first_track.device_index),
             ]);
@@ -102,7 +105,7 @@ impl MacOSPlatform {
                 "-f".to_string(),
                 "avfoundation".to_string(),
                 "-framerate".to_string(),
-                in_fps.to_string(),
+                av_fps.to_string(),
                 "-i".to_string(),
                 format!("{}:none", clean),
             ]);
@@ -430,6 +433,16 @@ mod tests {
             prefixed_args,
             vec![
                 "-f", "avfoundation", "-framerate", "30", "-i", "1:0",
+                "-f", "avfoundation", "-i", "none:1"
+            ]
+        );
+
+        // Non-standard framerate (e.g. 15fps migrated from Windows config.toml) is normalized to 30
+        let migrated_fps_args = mac.build_recording_input_args("0", 15, &tracks);
+        assert_eq!(
+            migrated_fps_args,
+            vec![
+                "-f", "avfoundation", "-framerate", "30", "-i", "0:0",
                 "-f", "avfoundation", "-i", "none:1"
             ]
         );

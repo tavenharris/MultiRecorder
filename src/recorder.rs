@@ -26,13 +26,17 @@ fn get_fps_regex() -> &'static regex::Regex {
     FPS_REGEX.get_or_init(|| regex::Regex::new(r"(\d+(?:\.\d+)?)\s*(?:fps|tbr)").expect("valid fps regex"))
 }
 
-fn parse_detected_format(line: &str, default_fps: u32) -> Option<String> {
+fn parse_detected_format(line: &str, default_fps: u32, force_default_fps: bool) -> Option<String> {
     if line.contains("Stream #0:0") && line.contains("Video:") {
         let res = get_res_regex().captures(line).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
-        let fps = get_fps_regex().captures(line).and_then(|c| c.get(1)).map(|m| {
-            let n: f32 = m.as_str().parse().unwrap_or(default_fps as f32);
-            format!("{}fps", n.round() as u32)
-        }).unwrap_or_else(|| format!("{}fps", default_fps));
+        let fps = if force_default_fps {
+            format!("{}fps", default_fps)
+        } else {
+            get_fps_regex().captures(line).and_then(|c| c.get(1)).map(|m| {
+                let n: f32 = m.as_str().parse().unwrap_or(default_fps as f32);
+                format!("{}fps", n.round() as u32)
+            }).unwrap_or_else(|| format!("{}fps", default_fps))
+        };
         if let Some(res) = res {
             return Some(format!("{}  {}", res, fps));
         }
@@ -73,7 +77,6 @@ fn stop_child_gracefully(mut child: Child, name: &str, timeout: Duration) {
 
 pub struct PreviewStream {
     video_device: String,
-    #[allow(dead_code)]
     is_screen: bool,
     child: Option<Child>,
     latest_frame: Arc<Mutex<Option<Vec<u8>>>>,
@@ -138,12 +141,16 @@ impl PreviewStream {
 
         if let Some(stderr) = child.stderr.take() {
             let fmt_arc = Arc::clone(&self.detected_format);
+            let is_screen = self.is_screen
+                || self.video_device.eq_ignore_ascii_case("desktop")
+                || self.video_device.to_lowercase().contains("screen");
+            let default_fps = if is_screen { 60 } else { 30 };
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 let mut found = false;
                 for line in reader.lines().flatten() {
                     if !found {
-                        if let Some(fmt_str) = parse_detected_format(&line, 30) {
+                        if let Some(fmt_str) = parse_detected_format(&line, default_fps, is_screen) {
                             if let Ok(mut lock) = fmt_arc.lock() {
                                 *lock = Some(fmt_str);
                                 found = true;
@@ -255,7 +262,8 @@ impl StreamRecorder {
             .to_string_lossy()
             .to_string();
 
-        let fps = self.source.fps.unwrap_or(60);
+        let raw_fps = self.source.fps.unwrap_or(60);
+        let fps = if raw_fps < 24 { 30 } else { raw_fps };
         let gop_size = fps * self.segment_duration_secs as u32;
 
         let is_camera = self.source.name.to_lowercase().contains("cam")
@@ -417,7 +425,7 @@ impl StreamRecorder {
                         let _ = writeln!(f, "{}", line);
                     }
 
-                    if let Some(fmt_str) = parse_detected_format(&line, 60) {
+                    if let Some(fmt_str) = parse_detected_format(&line, 60, false) {
                         if let Ok(mut lock) = fmt_arc.lock() {
                             *lock = Some(fmt_str);
                         }

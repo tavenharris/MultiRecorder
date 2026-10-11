@@ -162,7 +162,7 @@ fn main() -> Result<()> {
         Commands::Run { config: config_path } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
-                let cfg = if config_path.exists() {
+                let mut cfg = if config_path.exists() {
                     Config::load_from_file(&config_path)?
                 } else {
                     println!(
@@ -174,6 +174,16 @@ fn main() -> Result<()> {
                     default_cfg.save_to_file(&config_path)?;
                     default_cfg
                 };
+
+                if let Ok(devices) = DeviceManager::list_devices() {
+                    let fixes = cfg.sanitize_for_platform(&devices);
+                    if !fixes.is_empty() {
+                        for fix in &fixes {
+                            tracing::info!("Startup hardware/OS compatibility auto-heal: {}", fix);
+                        }
+                        let _ = cfg.save_to_file(&config_path);
+                    }
+                }
 
                 let mut engine = RecordingEngine::new(cfg);
                 engine.run().await
