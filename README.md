@@ -173,8 +173,9 @@ cargo run --release -- gui
 ```
 
 #### GUI Highlights:
-- **Flashback Control**: Click **`▶ Start Flashback`** to begin continuous buffering.
-- **Save Clip**: Click **`⚡ Save Clip [F]`** or press `F` / `Space` to instantly extract the rolling buffer.
+- **Continuous Forward Recording**: Click **`● Record [R]`** (or tap `R`) to record going forward continuously. When finished, click **`■ Stop Recording [R]`** to instantly save and finalize the entire session to your output folder.
+- **Rolling Flashback Buffer**: Click **`▶ Start Flashback`** to begin rolling ring-buffer capture.
+- **Multi-Interval Quick Save Buttons**: While Flashback is active, click any interval button (e.g. **`⚡ 30s [1]`**, **`⚡ 1m [2]`**, **`⚡ 5m [3]`**, **`⚡ 20m [4]`**) or press keyboard shortcuts `1`..`9` (or `Space` / `F`) to instantly extract that duration.
 - **Live Video Viewports**: Watch preview video feeds locked to a crisp 16:9 aspect ratio.
 - **Input / Output Badges**:
   - `input`: Live probed resolution (e.g., `3024x1964 60fps` for Liquid Retina or `1920x1080 30fps` for webcams).
@@ -185,9 +186,9 @@ cargo run --release -- gui
 - **Flashback Buffer Selector**:
   - Quick chips: `1m`, `5m`, `15m`, `30m`, `1h`, `2h`.
   - Slider: fine-tune anywhere from 1 to 120 minutes.
-- **Master Action**: Click **`⚡ SAVE FLASHBACK [Space / F]`** or tap the spacebar to export.
 - **Settings Drawer (`⚙ Settings`)**:
   - Switch output container: **MP4**, **MOV**, or **MKV**.
+  - Configure quick clip interval button presets (15s to 30m) or add custom second intervals.
   - Output folder: click **`📂 Browse...`** to pick a destination folder with the macOS file picker, or **`Reveal`** to open in Finder.
   - Configure video encoder: **Apple H.264**, **Apple HEVC / H.265**, or **libx264**.
   - Adjust primary/secondary video bitrates and audio bitrates (`192k`, `256k`, `320k`).

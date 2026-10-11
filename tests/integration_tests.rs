@@ -83,8 +83,27 @@ fn test_config_custom_file_operations() {
     assert_eq!(loaded.sources[0].encoder, "hevc_videotoolbox");
     assert_eq!(loaded.audio_tracks.len(), 5);
     assert_eq!(loaded.audio_tracks[2].name, "Discord");
+    assert_eq!(loaded.clip_intervals, vec![30, 60, 300, 1200]);
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_clip_intervals_and_formatting() {
+    use multirecording::ui::MultiRecordingApp;
+
+    assert_eq!(MultiRecordingApp::format_interval_label(15), "15s");
+    assert_eq!(MultiRecordingApp::format_interval_label(30), "30s");
+    assert_eq!(MultiRecordingApp::format_interval_label(45), "45s");
+    assert_eq!(MultiRecordingApp::format_interval_label(60), "1m");
+    assert_eq!(MultiRecordingApp::format_interval_label(120), "2m");
+    assert_eq!(MultiRecordingApp::format_interval_label(300), "5m");
+    assert_eq!(MultiRecordingApp::format_interval_label(600), "10m");
+    assert_eq!(MultiRecordingApp::format_interval_label(900), "15m");
+    assert_eq!(MultiRecordingApp::format_interval_label(1200), "20m");
+    assert_eq!(MultiRecordingApp::format_interval_label(3600), "1h");
+    assert_eq!(MultiRecordingApp::format_interval_label(90), "1m 30s");
+    assert_eq!(MultiRecordingApp::format_interval_label(7200), "2h");
 }
 
 #[test]
@@ -342,4 +361,17 @@ fn test_audio_track_monitor_lifecycle() {
     assert!(peak >= 0.0 && peak <= 1.0);
     monitor.stop();
 }
+
+#[test]
+fn test_recording_modes() {
+    use multirecording::ui::RecordingMode;
+
+    let mode_fb = RecordingMode::Flashback;
+    let mode_cont = RecordingMode::Continuous;
+
+    assert_ne!(mode_fb, mode_cont);
+    assert_eq!(mode_fb, RecordingMode::Flashback);
+    assert_eq!(mode_cont, RecordingMode::Continuous);
+}
+
 

@@ -30,6 +30,9 @@ pub struct Config {
     /// Embed standardized SMPTE Timecode track and metadata for NLE timecode sync
     #[serde(default = "default_embed_timecode")]
     pub embed_timecode: bool,
+    /// Flashback clip intervals in seconds shown as quick save buttons in the UI
+    #[serde(default = "default_clip_intervals")]
+    pub clip_intervals: Vec<u64>,
 }
 
 fn default_sync_audio_to_secondary() -> bool {
@@ -46,6 +49,10 @@ fn default_output_format() -> String {
 
 fn default_audio_bitrate() -> String {
     "320k".to_string()
+}
+
+pub fn default_clip_intervals() -> Vec<u64> {
+    vec![30, 60, 300, 1200]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +151,7 @@ impl Default for Config {
             audio_bitrate: "320k".to_string(),
             sync_audio_to_secondary: true,
             embed_timecode: true,
+            clip_intervals: default_clip_intervals(),
         }
     }
 }
@@ -183,6 +191,7 @@ mod tests {
         assert_eq!(cfg.audio_tracks.len(), 5);
         assert_eq!(cfg.sources[0].resolution, Some("1920x1080".to_string()));
         assert_eq!(cfg.sources[0].fps, Some(60));
+        assert_eq!(cfg.clip_intervals, vec![30, 60, 300, 1200]);
     }
 
     #[test]
@@ -192,6 +201,7 @@ mod tests {
         cfg.audio_bitrate = "256k".to_string();
         cfg.sync_audio_to_secondary = false;
         cfg.embed_timecode = true;
+        cfg.clip_intervals = vec![15, 60, 180];
         cfg.sources[0].resolution = Some("3840x2160".to_string());
         cfg.sources[0].fps = Some(60);
 
@@ -201,6 +211,7 @@ mod tests {
         assert_eq!(loaded.audio_bitrate, "256k");
         assert!(!loaded.sync_audio_to_secondary);
         assert!(loaded.embed_timecode);
+        assert_eq!(loaded.clip_intervals, vec![15, 60, 180]);
         assert_eq!(loaded.sources[0].resolution, Some("3840x2160".to_string()));
     }
 }

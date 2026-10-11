@@ -1,11 +1,17 @@
 buffer_duration_secs = 1800
-segment_duration_secs = 3
+segment_duration_secs = 5
 output_dir = "recordings"
 buffer_dir = "/tmp/multirecording_buffer"
 output_format = "mp4"
 audio_bitrate = "256k"
-sync_audio_to_secondary = true
+sync_audio_to_secondary = false
 embed_timecode = true
+clip_intervals = [
+    30,
+    60,
+    300,
+    1200,
+]
 
 [[sources]]
 name = "gameplay"
@@ -23,9 +29,9 @@ encoder = "h264_videotoolbox"
 
 [[audio_tracks]]
 enabled = true
-name = "BlackHole 2ch"
+name = "Taven’s AirPods Pro"
 device_index = 0
-device_id = "out:BlackHole 2ch"
+device_id = "in:0"
 
 [[audio_tracks]]
 enabled = false

@@ -18,6 +18,12 @@ pub struct ExportRecord {
     pub size_mb: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingMode {
+    Flashback,
+    Continuous,
+}
+
 pub struct MultiRecordingApp {
     config: Config,
     config_path: PathBuf,
@@ -26,6 +32,7 @@ pub struct MultiRecordingApp {
 
     // Engine runtime state
     is_recording: bool,
+    recording_mode: Option<RecordingMode>,
     recorders: Vec<StreamRecorder>,
     managers: Vec<RingBufferManager>,
     last_eviction: Instant,
@@ -56,6 +63,7 @@ pub struct MultiRecordingApp {
     cam_video_idx: usize,
     #[allow(dead_code)]
     copied_brew_cmd_until: Option<Instant>,
+    custom_clip_sec_input: String,
 }
 
 impl MultiRecordingApp {
@@ -89,6 +97,7 @@ impl MultiRecordingApp {
             discovered_devices: devices,
             has_loopback,
             is_recording: false,
+            recording_mode: None,
             recorders: Vec::new(),
             managers: Vec::new(),
             last_eviction: Instant::now(),
@@ -108,6 +117,7 @@ impl MultiRecordingApp {
             game_video_idx: 0,
             cam_video_idx: 0,
             copied_brew_cmd_until: None,
+            custom_clip_sec_input: String::new(),
         };
 
         app.sync_device_selections();
@@ -610,7 +620,21 @@ impl MultiRecordingApp {
         }
     }
 
-    pub fn start_engine(&mut self) {
+    pub fn format_interval_label(secs: u64) -> String {
+        if secs < 60 {
+            format!("{}s", secs)
+        } else if secs % 3600 == 0 {
+            format!("{}h", secs / 3600)
+        } else if secs % 60 == 0 {
+            format!("{}m", secs / 60)
+        } else if secs >= 3600 {
+            format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+        } else {
+            format!("{}m {}s", secs / 60, secs % 60)
+        }
+    }
+
+    pub fn start_engine(&mut self, mode: RecordingMode) {
         if self.is_recording {
             return;
         }
@@ -714,11 +738,19 @@ impl MultiRecordingApp {
 
         if success {
             self.is_recording = true;
+            self.recording_mode = Some(mode);
             self.recording_started_at = Some(Instant::now());
-            let status_text = if sources_to_record.len() == 1 && self.config.sources.len() > 1 {
-                "Recording active! Stream 1 live (Stream 2 standby: select a 2nd video device).".to_string()
-            } else {
-                "Recording active! Live multi-source buffer running...".to_string()
+            let status_text = match mode {
+                RecordingMode::Continuous => {
+                    "🎬 Continuous recording LIVE! Forward recording until you click Stop.".to_string()
+                }
+                RecordingMode::Flashback => {
+                    if sources_to_record.len() == 1 && self.config.sources.len() > 1 {
+                        "Flashback active! Stream 1 live (Stream 2 standby: select a 2nd video device).".to_string()
+                    } else {
+                        "Flashback active! Live multi-source buffer running...".to_string()
+                    }
+                }
             };
             self.status_message = Some((status_text, Instant::now(), false));
         } else {
@@ -727,6 +759,11 @@ impl MultiRecordingApp {
     }
 
     pub fn stop_engine(&mut self) {
+        if self.recording_mode == Some(RecordingMode::Continuous) {
+            self.stop_continuous_recording();
+            return;
+        }
+
         for recorder in &mut self.recorders {
             let _ = recorder.stop();
         }
@@ -740,11 +777,127 @@ impl MultiRecordingApp {
         self.managers.clear();
 
         self.is_recording = false;
+        self.recording_mode = None;
         self.recording_started_at = None;
         self.last_preview_seq_1 = 0;
         self.last_preview_seq_2 = 0;
         self.ensure_preview_streams();
-        self.status_message = Some(("Recording stopped. Buffer reset & cleared.".to_string(), Instant::now(), false));
+        self.status_message = Some(("Flashback stopped. Buffer reset & cleared.".to_string(), Instant::now(), false));
+    }
+
+    /// Stops continuous forward recording and losslessly concatenates all segments into the final video file(s)
+    pub fn stop_continuous_recording(&mut self) {
+        if !self.is_recording {
+            return;
+        }
+
+        // 1. Stop all recorders to ensure all segments are flushed to disk
+        for recorder in &mut self.recorders {
+            let _ = recorder.stop();
+        }
+        self.recorders.clear();
+
+        let elapsed = self.recording_started_at.map(|t| t.elapsed()).unwrap_or(Duration::from_secs(0));
+        let timestamp = Remuxer::generate_session_timestamp();
+        let mut exported_files = Vec::new();
+        let mut total_size = 0.0;
+
+        let out_ext = if self.config.output_format.trim().is_empty() {
+            "mp4"
+        } else {
+            &self.config.output_format
+        };
+
+        // Extract shared start timecode
+        let shared_timecode = if self.config.embed_timecode {
+            let mut found_tc = None;
+            for mgr in &self.managers {
+                if let Ok(segs) = mgr.list_segments() {
+                    if !segs.is_empty() {
+                        let paths: Vec<PathBuf> = segs.iter().map(|s| s.path.clone()).collect();
+                        found_tc = Some(Remuxer::extract_start_timecode_from_segments(&paths));
+                        break;
+                    }
+                }
+            }
+            found_tc
+        } else {
+            None
+        };
+
+        // 2. Stitch all segments for each manager
+        for mgr in &self.managers {
+            let segments: Vec<PathBuf> = match mgr.list_segments() {
+                Ok(segs) => segs.into_iter().map(|s| s.path).collect(),
+                Err(e) => {
+                    self.status_message = Some((format!("Error listing segments: {}", e), Instant::now(), true));
+                    continue;
+                }
+            };
+
+            if segments.is_empty() {
+                continue;
+            }
+
+            let out_file = self.config.output_dir.join(format!(
+                "Recording_{}_{}.{}",
+                timestamp,
+                mgr.source_name(),
+                out_ext
+            ));
+
+            if let Err(e) = Remuxer::stitch_segments(&segments, &out_file, shared_timecode.as_deref()) {
+                self.status_message = Some((format!("Remuxing recording failed: {}", e), Instant::now(), true));
+                continue;
+            }
+
+            if let Ok(meta) = fs::metadata(&out_file) {
+                total_size += meta.len() as f64 / (1024.0 * 1024.0);
+            }
+            exported_files.push(out_file);
+        }
+
+        // 3. Clear temporary buffer directory now that continuous file has been created
+        let _ = RingBufferManager::wipe_buffer_dir(&self.config.buffer_dir);
+        for mgr in &self.managers {
+            let _ = mgr.wipe_all();
+        }
+        self.managers.clear();
+
+        self.is_recording = false;
+        self.recording_mode = None;
+        self.recording_started_at = None;
+        self.last_preview_seq_1 = 0;
+        self.last_preview_seq_2 = 0;
+        self.ensure_preview_streams();
+
+        if let Some(first) = exported_files.first() {
+            self.recent_exports.insert(
+                0,
+                ExportRecord {
+                    timestamp: timestamp.clone(),
+                    path: first.clone(),
+                    duration_secs: elapsed.as_secs(),
+                    size_mb: total_size,
+                },
+            );
+        }
+
+        let dur_str = if elapsed.as_secs() >= 3600 {
+            format!("{}:{:02}:{:02}", elapsed.as_secs() / 3600, (elapsed.as_secs() % 3600) / 60, elapsed.as_secs() % 60)
+        } else {
+            format!("{}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+        };
+
+        if !exported_files.is_empty() {
+            self.status_message = Some((
+                format!("🎬 Recording saved! ({}, {:.1} MB, {} file{})", dur_str, total_size, exported_files.len(), if exported_files.len() > 1 { "s" } else { "" }),
+                Instant::now(),
+                false,
+            ));
+        } else {
+            self.status_message = Some(("Recording stopped (no segments captured).".to_string(), Instant::now(), false));
+        }
     }
 
     pub fn trigger_flashback(&mut self, duration_secs: u64) {
@@ -934,8 +1087,8 @@ impl eframe::App for MultiRecordingApp {
 
         ctx.request_repaint_after(Duration::from_millis(60));
 
-        // Background Ring Buffer Eviction
-        if self.is_recording && self.last_eviction.elapsed() >= Duration::from_secs(5) {
+        // Background Ring Buffer Eviction (Only active during Flashback mode!)
+        if self.is_recording && self.recording_mode == Some(RecordingMode::Flashback) && self.last_eviction.elapsed() >= Duration::from_secs(5) {
             let max_age = Duration::from_secs(self.config.buffer_duration_secs);
             for mgr in &self.managers {
                 let _ = mgr.evict_older_than(max_age);
@@ -1014,10 +1167,53 @@ impl eframe::App for MultiRecordingApp {
             }
         }
 
-        // Global hotkey check (Space or 'F' triggers flashback)
-        if ctx.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::F)) {
-            if self.is_recording {
-                self.trigger_flashback(self.selected_flashback_secs);
+        // Global hotkeys ('R' for continuous record, Space/F/1..9 for flashback)
+        if !ctx.wants_keyboard_input() {
+            // 'R' key toggles continuous forward recording
+            if ctx.input(|i| i.key_pressed(egui::Key::R)) {
+                if self.is_recording {
+                    if self.recording_mode == Some(RecordingMode::Continuous) {
+                        self.stop_continuous_recording();
+                    }
+                } else {
+                    self.start_engine(RecordingMode::Continuous);
+                }
+            }
+
+            // Flashback clip hotkeys
+            if self.is_recording && self.recording_mode == Some(RecordingMode::Flashback) {
+                let triggered_secs = ctx.input(|i| {
+                    if i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::F) {
+                        return Some(self.selected_flashback_secs);
+                    }
+                    let number_keys = [
+                        egui::Key::Num1,
+                        egui::Key::Num2,
+                        egui::Key::Num3,
+                        egui::Key::Num4,
+                        egui::Key::Num5,
+                        egui::Key::Num6,
+                        egui::Key::Num7,
+                        egui::Key::Num8,
+                        egui::Key::Num9,
+                    ];
+                    let intervals = if self.config.clip_intervals.is_empty() {
+                        crate::config::default_clip_intervals()
+                    } else {
+                        self.config.clip_intervals.clone()
+                    };
+                    for (idx, key) in number_keys.iter().enumerate() {
+                        if idx < intervals.len() && i.key_pressed(*key) {
+                            return Some(intervals[idx]);
+                        }
+                    }
+                    None
+                });
+
+                if let Some(secs) = triggered_secs {
+                    self.selected_flashback_secs = secs;
+                    self.trigger_flashback(secs);
+                }
             }
         }
 
@@ -1030,7 +1226,7 @@ impl eframe::App for MultiRecordingApp {
 
             // ==========================================
             // TOP BAR (Matching User Sketch Exactly)
-            // [Start Engine]      13 Mb/s (20 GB)    3:58s    [⚙ settings]
+            // [Start Engine]  [⚡ 30s] [⚡ 1m] [⚡ 5m] [⚡ 20m]    13 Mb/s (20 GB)    3:58s    [⚙ settings]
             // ==========================================
             egui::Frame::none()
                 .fill(Color32::from_rgb(22, 22, 26))
@@ -1039,32 +1235,107 @@ impl eframe::App for MultiRecordingApp {
                 .inner_margin(Margin::symmetric(14.0, 10.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        // Left: Start / Stop Flashback Button
-                        if self.is_recording {
-                            if ui.add(
-                                egui::Button::new(RichText::new("■ Stop Flashback").color(Color32::from_rgb(244, 63, 94)).strong())
-                                    .min_size(Vec2::new(130.0, 32.0))
-                            ).clicked() {
-                                self.stop_engine();
+                        // Left: Mode Controls (Continuous Record or Flashback Buffer)
+                        match self.recording_mode {
+                            Some(RecordingMode::Continuous) => {
+                                // In Continuous mode: Stop Recording button
+                                if ui.add(
+                                    egui::Button::new(RichText::new("■ Stop Recording [R]").color(Color32::WHITE).strong())
+                                        .fill(Color32::from_rgb(225, 29, 72))
+                                        .min_size(Vec2::new(140.0, 32.0))
+                                ).on_hover_text("Stop and finalize continuous recording to output folder (Hotkey: R)").clicked() {
+                                    self.stop_continuous_recording();
+                                }
                             }
-                        } else {
-                            if ui.add(
-                                egui::Button::new(RichText::new("▶ Start Flashback").color(Color32::from_rgb(16, 185, 129)).strong())
-                                    .min_size(Vec2::new(130.0, 32.0))
-                            ).clicked() {
-                                self.start_engine();
+                            Some(RecordingMode::Flashback) => {
+                                // In Flashback mode: Stop Flashback button
+                                if ui.add(
+                                    egui::Button::new(RichText::new("■ Stop Flashback").color(Color32::from_rgb(244, 63, 94)).strong())
+                                        .min_size(Vec2::new(125.0, 32.0))
+                                ).on_hover_text("Stop flashback buffer and clear temporary cache").clicked() {
+                                    self.stop_engine();
+                                }
+                            }
+                            None => {
+                                // Idle state: Both '● Record' and '▶ Start Flashback' are available
+                                if ui.add(
+                                    egui::Button::new(RichText::new("● Record [R]").color(Color32::from_rgb(244, 63, 94)).strong())
+                                        .min_size(Vec2::new(95.0, 32.0))
+                                ).on_hover_text("Start continuous forward recording (Hotkey: R)").clicked() {
+                                    self.start_engine(RecordingMode::Continuous);
+                                }
+
+                                ui.add_space(4.0);
+                                if ui.add(
+                                    egui::Button::new(RichText::new("▶ Start Flashback").color(Color32::from_rgb(16, 185, 129)).strong())
+                                        .min_size(Vec2::new(125.0, 32.0))
+                                ).on_hover_text("Start rolling ring buffer for flashback clip exports").clicked() {
+                                    self.start_engine(RecordingMode::Flashback);
+                                }
                             }
                         }
 
-                        if self.is_recording {
-                            ui.add_space(6.0);
-                            if ui.add(
-                                egui::Button::new(RichText::new("⚡ Save Clip [F]").color(Color32::WHITE).size(11.0).strong())
-                                    .fill(Color32::from_rgb(225, 29, 72))
-                                    .min_size(Vec2::new(105.0, 32.0))
-                            ).clicked() {
-                                self.trigger_flashback(self.selected_flashback_secs);
+                        // Quick Save Interval Buttons (Active in Flashback mode, dimmed when idle/continuous)
+                        let is_flashback = self.recording_mode == Some(RecordingMode::Flashback);
+                        let intervals: Vec<u64> = if self.config.clip_intervals.is_empty() {
+                            crate::config::default_clip_intervals()
+                        } else {
+                            self.config.clip_intervals.clone()
+                        };
+
+                        ui.add_space(8.0);
+                        for (idx, &secs) in intervals.iter().enumerate() {
+                            let label = Self::format_interval_label(secs);
+                            let shortcut_str = if idx < 9 && is_flashback {
+                                format!(" [{}]", idx + 1)
+                            } else {
+                                String::new()
+                            };
+
+                            let btn_color = if is_flashback {
+                                if self.selected_flashback_secs == secs {
+                                    Color32::from_rgb(225, 29, 72)
+                                } else {
+                                    Color32::from_rgb(180, 24, 58)
+                                }
+                            } else {
+                                Color32::from_rgb(32, 32, 38)
+                            };
+
+                            let text_color = if is_flashback {
+                                Color32::WHITE
+                            } else {
+                                Color32::from_rgb(113, 113, 122)
+                            };
+
+                            let btn_text = format!("⚡ {}{}", label, shortcut_str);
+                            let btn = egui::Button::new(
+                                RichText::new(btn_text)
+                                    .color(text_color)
+                                    .size(11.0)
+                                    .strong(),
+                            )
+                            .fill(btn_color)
+                            .min_size(Vec2::new(56.0, 32.0));
+
+                            let mut resp = ui.add_enabled(is_flashback, btn);
+                            if is_flashback {
+                                let hotkey_desc = if idx < 9 {
+                                    format!(" (Hotkey: {})", idx + 1)
+                                } else {
+                                    String::new()
+                                };
+                                resp = resp.on_hover_text(format!("⚡ Save last {} clip{}", label, hotkey_desc));
+                                if resp.clicked() {
+                                    self.selected_flashback_secs = secs;
+                                    self.trigger_flashback(secs);
+                                }
+                            } else if self.recording_mode == Some(RecordingMode::Continuous) {
+                                resp = resp.on_disabled_hover_text("Continuous recording is saving everything forward");
+                            } else {
+                                resp = resp.on_disabled_hover_text("▶ Start Flashback to begin buffering clips");
                             }
+                            ui.add_space(2.0);
                         }
 
                         // Right: Metrics, Live Timer & Settings Button
@@ -1610,6 +1881,87 @@ impl MultiRecordingApp {
                                 }
                             }
                         });
+                    });
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    // --- Row 4b: Quick Clip Intervals Configuration ---
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("⚡ Quick Clip Intervals:").strong().color(Color32::from_rgb(244, 244, 245)));
+                        ui.label(RichText::new("(Toggle presets or add custom)").size(11.0).color(Color32::from_rgb(156, 163, 175)));
+
+                        let presets = [
+                            (15, "15s"),
+                            (30, "30s"),
+                            (45, "45s"),
+                            (60, "1m"),
+                            (120, "2m"),
+                            (300, "5m"),
+                            (600, "10m"),
+                            (900, "15m"),
+                            (1200, "20m"),
+                            (1800, "30m"),
+                        ];
+
+                        let mut changed = false;
+                        for &(secs, label) in &presets {
+                            let is_active = self.config.clip_intervals.contains(&secs);
+                            let btn_color = if is_active {
+                                Color32::from_rgb(225, 29, 72)
+                            } else {
+                                Color32::from_rgb(45, 45, 52)
+                            };
+                            let text_color = if is_active {
+                                Color32::WHITE
+                            } else {
+                                Color32::from_rgb(161, 161, 170)
+                            };
+
+                            if ui.add(
+                                egui::Button::new(RichText::new(label).color(text_color).size(10.0))
+                                    .fill(btn_color)
+                            ).clicked() {
+                                if is_active {
+                                    self.config.clip_intervals.retain(|&x| x != secs);
+                                } else {
+                                    self.config.clip_intervals.push(secs);
+                                    self.config.clip_intervals.sort_unstable();
+                                }
+                                changed = true;
+                            }
+                        }
+
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Sec:").size(11.0).color(Color32::from_rgb(161, 161, 170)));
+                        let resp = ui.add(egui::TextEdit::singleline(&mut self.custom_clip_sec_input).desired_width(40.0));
+                        if ui.add(egui::Button::new(RichText::new("+ Add").size(10.0))).clicked()
+                            || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        {
+                            if let Ok(secs) = self.custom_clip_sec_input.trim().parse::<u64>() {
+                                if secs > 0 && !self.config.clip_intervals.contains(&secs) {
+                                    self.config.clip_intervals.push(secs);
+                                    self.config.clip_intervals.sort_unstable();
+                                    self.custom_clip_sec_input.clear();
+                                    changed = true;
+                                }
+                            }
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(RichText::new("Reset Defaults").size(10.0)).fill(Color32::from_rgb(45, 45, 52))).clicked() {
+                                self.config.clip_intervals = crate::config::default_clip_intervals();
+                                changed = true;
+                            }
+                        });
+
+                        if changed {
+                            if self.config.clip_intervals.is_empty() {
+                                self.config.clip_intervals = vec![60];
+                            }
+                            let _ = self.config.save_to_file(&self.config_path);
+                        }
                     });
 
                     ui.add_space(8.0);
